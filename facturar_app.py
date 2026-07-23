@@ -1,0 +1,1057 @@
+#!/usr/bin/env python3
+"""
+Facturación Terminales — Anser Indicus SPA
+Interfaz web Streamlit v1.0
+"""
+import io, re, unicodedata
+from datetime import date, datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ─── Configuración ────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Facturación — Anser Indicus",
+    page_icon="🧾",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─── Login ────────────────────────────────────────────────────────────────────
+def check_password():
+    """Muestra pantalla de login. Devuelve True si la sesión está autenticada."""
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown("""
+    <div style="max-width:380px; margin:80px auto 0;">
+    """, unsafe_allow_html=True)
+    st.title("🧾 Facturación Terminales")
+    st.caption("Anser Indicus SPA — acceso restringido")
+    st.divider()
+
+    with st.form("login_form"):
+        pwd = st.text_input("Contraseña", type="password", placeholder="••••••••")
+        ok  = st.form_submit_button("Ingresar →", use_container_width=True, type="primary")
+        if ok:
+            clave_correcta = st.secrets.get("password", "")
+            if pwd == clave_correcta:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    return False
+
+# ─── Constantes ───────────────────────────────────────────────────────────────
+COMERCIALES   = ['diego toledo', 'jorge de freitas', 'franco de luca', 'milagros sosa vidoni']
+PRECIO_UNIT   = 71345
+MESES_ES      = {1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',
+                 7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'}
+PROD_TERM     = '[SPFP] SmartPOS Urovo i9100'
+CTA_TERM      = '310114 Venta de Devices Fudo Pagos'
+PROD_COM      = 'Comisiones T.O. Plus'
+CTA_COM       = '310160 Comisiones Tienda online'
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def normalizar(s):
+    if not s or str(s).strip() == '' or str(s).lower() == 'nan': return ''
+    s = str(s).strip().lower()
+    s = unicodedata.normalize('NFD', s)
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+    return re.sub(r'\s+', ' ', s)
+
+def es_vacio(val):
+    return not val or str(val).strip() == '' or str(val).lower() in ('nan','none','no encontrado','')
+
+def limpiar_rut(rut):
+    return str(rut).replace('.','').replace('-','').lower().strip()
+
+def es_comercial(op):
+    return any(c in str(op).lower() for c in COMERCIALES)
+
+def parse_fecha_dt(f):
+    try: return datetime.strptime(f, '%d/%m/%Y')
+    except: return datetime.min
+
+def calc_total_df(df, pu=PRECIO_UNIT):
+    if df.empty: return 0
+    return sum(round(pu * int(r['cantidad']) * (1 - r['descuento']/100) * 1.19) for _, r in df.iterrows())
+
+# ─── Estilos Excel ───────────────────────────────────────────────────────────
+header_fill = PatternFill('solid', start_color='1F4E79')
+red_fill    = PatternFill('solid', start_color='FFD7D7')
+orange_fill = PatternFill('solid', start_color='FFE0B2')
+yellow_fill = PatternFill('solid', start_color='FFFF00')
+green_fill  = PatternFill('solid', start_color='E2EFDA')
+total_fill  = PatternFill('solid', start_color='D9E1F2')
+blue_fill   = PatternFill('solid', start_color='DDEEFF')
+field_red   = PatternFill('solid', start_color='FF0000')
+
+def aplicar_header(ws, headers, widths=None):
+    for col_idx, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ws.row_dimensions[1].height = 30
+    if widths:
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+# ─── Regiones (bundled en el repo) ───────────────────────────────────────────
+@st.cache_data
+def cargar_regiones():
+    ruta = Path(__file__).parent / "datos" / "Regiones_de_chile_y_comunas.xlsx"
+    if not ruta.exists():
+        st.warning("⚠️ No se encontró datos/Regiones_de_chile_y_comunas.xlsx — las regiones quedarán vacías.")
+        return {}
+    df = pd.read_excel(ruta)
+    return {normalizar(r['Comuna']): str(r['Validación']).strip()
+            for _, r in df.iterrows() if normalizar(str(r['Comuna']))}
+
+def buscar_region(comuna, rl):
+    k = normalizar(comuna)
+    if not k: return ''
+    if k in rl: return rl[k]
+    for rk, rv in rl.items():
+        if rk and (rk in k or k in rk): return rv
+    return ''
+
+def es_comuna_valida(v, rl):
+    return buscar_region(v, rl) != ''
+
+# ─── Parsers ──────────────────────────────────────────────────────────────────
+def parse_terminal(s):
+    s = s.strip().strip('"')
+    parts = s.split(':')
+    return (parts[1].strip(),
+            ':'.join(parts[5:]).strip() if len(parts) > 5 else '',
+            [{'qty': int(parts[2].strip()), 'desc': float(parts[3].strip().replace(',','.'))}])
+
+def parse_tfp(s):
+    s = s.strip().strip('"')
+    parts = s.split(':')
+    if len(parts) < 3: return '', '', []
+    id_c, nombre = parts[1].strip(), parts[-1].strip()
+    ld = {}
+    for l in parts[2:]:
+        l = l.strip()
+        if l == '': break
+        if ';' not in l: continue
+        try:
+            tokens = l.split(';')
+            if len(tokens) < 2: continue
+            qv = int(tokens[0].strip())
+            dv = float(tokens[1].strip().replace(',','.'))
+            if qv > 0: ld[dv] = ld.get(dv, 0) + qv
+        except (ValueError, IndexError): pass
+    return id_c, nombre, [{'qty': q, 'desc': d} for d, q in sorted(ld.items())]
+
+def get_ref_string(row, col_desc, col_extref, tiene_extref):
+    if tiene_extref:
+        v = str(row.get(col_extref, '') or '').strip()
+        if v.startswith(('Terminal:', 'TFP:')): return v
+    v = str(row.get(col_desc, '') or '').strip().strip('"')
+    if v.startswith(('Terminal:', 'TFP:')): return v
+    return None
+
+# ─── Cargadores de datos ──────────────────────────────────────────────────────
+def leer_collection(f):
+    try:
+        if f.name.lower().endswith('.csv'):
+            content = f.read().decode('utf-8', errors='replace')
+            f.seek(0)
+            sep = ';' if content.count(';') > content.count(',') else ','
+            df_c = pd.read_csv(io.StringIO(content), sep=sep, header=None, on_bad_lines='skip', engine='python')
+        else:
+            df_c = pd.read_excel(f, header=None, engine='calamine')
+    except Exception:
+        f.seek(0)
+        df_c = pd.read_excel(f, header=None, engine='openpyxl')
+    df_c.columns = df_c.iloc[0]
+    df_c = df_c[1:].reset_index(drop=True)
+    col_desc   = 'Descripción de la operación (reason)'
+    col_opid   = 'Número de operación de Mercado Pago (operation_id)'
+    col_monto  = 'Valor del producto (transaction_amount)'
+    col_fecha  = 'Fecha de compra (date_created)'
+    col_op     = 'Operador en cobros de Point (operator_name)'
+    col_extref = 'Código de referencia (external_reference)'
+    missing = [c for c in [col_desc, col_opid, col_monto] if c not in df_c.columns]
+    if missing:
+        raise ValueError(f"Columnas faltantes en collection: {', '.join(missing)}")
+    df_c[col_monto] = pd.to_numeric(df_c[col_monto].astype(str).str.replace(',','.'), errors='coerce')
+    df_c[col_opid]  = df_c[col_opid].astype(str).str.strip()
+    cols = {'desc': col_desc, 'opid': col_opid, 'monto': col_monto,
+            'fecha': col_fecha, 'op': col_op, 'extref': col_extref}
+    return df_c, cols
+
+def leer_billing(f):
+    df = pd.read_csv(f, dtype={'ID': str})
+    df['RUT_clean'] = (df['Código'].astype(str)
+                       .str.replace('.', '', regex=False)
+                       .str.replace('-', '', regex=False)
+                       .str.strip().str.lower())
+    df['ID'] = df['ID'].astype(str).str.strip()
+    return df.set_index('ID')[['RUT_clean','Razón social','Nombre','Giro','Domicilio','Comuna','Email']].to_dict('index')
+
+def leer_contactos(f):
+    df = pd.read_excel(f, dtype=str)
+    df['Referencia_clean'] = df['Referencia'].astype(str).str.strip()
+    df['NIF_clean'] = (df['NIF'].astype(str)
+                       .str.replace('.', '', regex=False)
+                       .str.replace('-', '', regex=False)
+                       .str.strip().str.lower())
+    df['DB_ID'] = df['ID'].astype(str).str.extract(r'res_partner_(\d+)_')
+    _cols_odoo = {'razon_social': 'Nombre', 'giro': 'Giro',
+                  'domicilio': 'Nombre de la calle', 'comuna': 'Ciudad'}
+    ref_to_odoo_datos = {}
+    for _, r in df.iterrows():
+        ref = str(r.get('Referencia', '')).strip()
+        if ref and ref != 'nan':
+            ref_to_odoo_datos[ref] = {
+                c: str(r.get(co, '') or '').strip()
+                for c, co in _cols_odoo.items() if co in df.columns
+            }
+    return {
+        'ref_to_dbid':       df.set_index('Referencia_clean')['DB_ID'].to_dict(),
+        'ref_to_nif':        df.set_index('Referencia_clean')['NIF_clean'].to_dict(),
+        'ref_to_nombre':     df.set_index('Referencia_clean')['Nombre'].to_dict(),
+        'nif_to_dbid':       df.set_index('NIF_clean')['DB_ID'].to_dict(),
+        'nif_to_ref':        df.set_index('NIF_clean')['Referencia_clean'].to_dict(),
+        'ref_to_odoo_datos': ref_to_odoo_datos,
+    }
+
+def leer_odoo(f):
+    df = pd.read_excel(f)
+    rc = 'Referencia del pago' if 'Referencia del pago' in df.columns else 'Referencia de pago'
+    return set(df[rc].astype(str).str.replace("'", "").str.strip().tolist())
+
+def leer_accounts(f):
+    df = pd.read_csv(f, skiprows=3, encoding='utf-8-sig',
+                     on_bad_lines='skip', engine='python', quotechar='"')
+    sa, sn = {}, {}
+    for _, r in df.iterrows():
+        n = str(r.get('Nombre', '') or '').strip()
+        if n and n.lower() != 'nan':
+            s = re.sub(r'\s+', '', n.lower())
+            sa[s] = str(r['ID']).strip()
+            sn[s] = n
+    return sa, sn
+
+# ─── get_billing ──────────────────────────────────────────────────────────────
+def get_billing(id_cuenta, billing_raw, rl):
+    datos = billing_raw.get(str(id_cuenta).strip(), {})
+    if not datos: return datos
+    comuna    = str(datos.get('Comuna', '') or '')
+    domicilio = str(datos.get('Domicilio', '') or '')
+    if not es_comuna_valida(comuna, rl) and es_comuna_valida(domicilio, rl):
+        datos = dict(datos)
+        datos['Comuna'], datos['Domicilio'] = domicilio, comuna
+    return datos
+
+# ─── Procesamiento principal ──────────────────────────────────────────────────
+def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
+             slug_to_accid, slug_to_nombre, hacer_terminales, hacer_comisiones):
+    col_desc   = cols['desc']
+    col_opid   = cols['opid']
+    col_monto  = cols['monto']
+    col_fecha  = cols['fecha']
+    col_op     = cols['op']
+    col_extref = cols['extref']
+    tiene_extref = col_extref in df_c.columns
+
+    ref_to_dbid  = refs['ref_to_dbid']
+    ref_to_nif   = refs['ref_to_nif']
+    nif_to_dbid  = refs['nif_to_dbid']
+    ref_to_nombre = refs['ref_to_nombre']
+
+    # Máscaras
+    mask_reason  = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:'))
+    mask_extref  = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:'))
+                    if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
+    mask_op      = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
+                    else pd.Series([False]*len(df_c), index=df_c.index))
+    mask_comision = df_c[col_desc].astype(str).str.contains('Deuda por comisiones', na=False)
+    df_term = df_c[mask_reason | mask_extref | mask_op | mask_comision].copy().reset_index(drop=True)
+
+    rows, rows_comision = [], []
+    duplicados, alertas_monto, alertas_operador, alertas_formato = [], [], [], []
+    comisiones_sin_cuenta = []
+
+    for _, row in df_term.iterrows():
+        desc_val   = str(row[col_desc]).strip().strip('"')
+        opid       = row[col_opid]
+        monto_real = row[col_monto]
+        operador   = str(row.get(col_op, '')) if col_op in df_c.columns else ''
+
+        if opid in ids_facturados:
+            duplicados.append(desc_val)
+            continue
+
+        # ── Comisiones ────────────────────────────────────────────
+        if 'Deuda por comisiones' in desc_val:
+            if not hacer_comisiones:
+                continue
+            fecha_c  = str(row.get(col_fecha, '')).strip().split(' ')[0]
+            if fecha_c == 'nan': fecha_c = ''
+            extref_v = str(row.get(col_extref, '') or '').strip() if tiene_extref else ''
+            slug = extref_v.split('@', 1)[1].lower() if '@' in extref_v else ''
+            acc_id = slug_to_accid.get(slug, '') if slug else ''
+            if not acc_id:
+                comisiones_sin_cuenta.append({
+                    'extref': extref_v, 'slug': slug,
+                    'operation_id': opid, 'monto': monto_real, 'fecha': fecha_c
+                })
+                continue
+            billing_c = get_billing(acc_id, billing_raw, rl)
+            rut_c     = billing_c.get('RUT_clean', 'NO ENCONTRADO')
+            sin_dat_c = (rut_c == 'NO ENCONTRADO')
+            db_id_c   = ref_to_dbid.get(acc_id, '')
+            if not db_id_c:
+                rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
+                db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
+            try:
+                _dt = datetime.strptime(fecha_c, '%d/%m/%Y')
+                terminos = f"'{MESES_ES[_dt.month]} {_dt.year} -  DF"
+            except Exception:
+                terminos = ''
+            rows_comision.append({
+                'id_cuenta': acc_id,
+                'nombre_cuenta': slug_to_nombre.get(slug, acc_id),
+                'operation_id': opid, 'monto_real': monto_real,
+                'precio_sin_iva': monto_real / 1.19,
+                'RUT_billing': rut_c, 'RUT_odoo': ref_to_nif.get(acc_id, ''),
+                'razon_social': billing_c.get('Razón social', ''),
+                'nombre_billing': billing_c.get('Nombre', ''),
+                'giro': billing_c.get('Giro', ''),
+                'domicilio': billing_c.get('Domicilio', ''),
+                'comuna': billing_c.get('Comuna', ''),
+                'email': billing_c.get('Email', ''),
+                'db_id': db_id_c, 'sin_datos': sin_dat_c,
+                'es_consumidor_final': limpiar_rut(rut_c) == '111111111',
+                'fecha_compra': fecha_c, 'terminos': terminos,
+            })
+            continue
+
+        # ── Terminales ────────────────────────────────────────────
+        if not hacer_terminales:
+            continue
+        ref_str   = get_ref_string(row, col_desc, col_extref, tiene_extref)
+        tiene_ref = ref_str is not None
+
+        if not tiene_ref and es_comercial(operador):
+            alertas_operador.append({
+                'operador': operador.strip(), 'descripcion': desc_val,
+                'operation_id': opid, 'monto': monto_real,
+                'fecha': str(row.get(col_fecha, '')).split(' ')[0]
+            })
+            continue
+
+        if not tiene_ref:
+            alertas_formato.append({
+                'descripcion': desc_val,
+                'extref': str(row.get(col_extref, '')) if tiene_extref else '',
+                'operation_id': opid, 'monto': monto_real,
+                'fecha': str(row.get(col_fecha, '')).split(' ')[0]
+            })
+            continue
+
+        if ref_str.startswith('Terminal:'):
+            id_c, nombre, lineas = parse_terminal(ref_str)
+        elif ref_str.startswith('TFP:'):
+            id_c, nombre, lineas = parse_tfp(ref_str)
+            if not lineas: continue
+        else:
+            continue
+
+        monto_esp       = round(sum(PRECIO_UNIT * l['qty'] * (1 - l['desc']/100) * 1.19 for l in lineas))
+        monto_diferente = abs(monto_real - monto_esp) > 1
+        if monto_diferente:
+            alertas_monto.append({
+                'nombre': nombre, 'id_cuenta': id_c, 'operation_id': opid,
+                'monto_esperado': monto_esp, 'monto_real': monto_real,
+                'diferencia': monto_real - monto_esp
+            })
+
+        billing     = get_billing(id_c, billing_raw, rl)
+        rut_billing = billing.get('RUT_clean', 'NO ENCONTRADO')
+        rut_odoo    = ref_to_nif.get(id_c, '')
+        db_id       = ref_to_dbid.get(id_c, '')
+        if not db_id:
+            rk = limpiar_rut(rut_billing) if rut_billing != 'NO ENCONTRADO' else ''
+            db_id = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
+        razon       = billing.get('Razón social', '')
+        sin_datos   = (rut_billing == 'NO ENCONTRADO')
+        es_cf       = limpiar_rut(rut_billing) == '111111111'
+        fecha_t     = str(row.get(col_fecha, '')).strip().split(' ')[0]
+        if fecha_t == 'nan': fecha_t = ''
+
+        for linea in lineas:
+            rows.append({
+                'id_cuenta': id_c, 'cantidad': linea['qty'], 'descuento': linea['desc'],
+                'nombre_cuenta': nombre, 'operation_id': opid, 'monto': monto_real,
+                'RUT_billing': rut_billing, 'RUT_odoo': rut_odoo,
+                'razon_social': razon, 'nombre_billing': billing.get('Nombre', ''),
+                'giro': billing.get('Giro', ''), 'domicilio': billing.get('Domicilio', ''),
+                'comuna': billing.get('Comuna', ''), 'email': billing.get('Email', ''),
+                'db_id': db_id, 'contacto_nombre': ref_to_nombre.get(id_c, ''),
+                'monto_diferente': monto_diferente, 'sin_datos': sin_datos,
+                'es_consumidor_final': es_cf, 'fecha_compra': fecha_t,
+            })
+
+    return {
+        'rows': rows, 'rows_comision': rows_comision,
+        'duplicados': duplicados, 'alertas_monto': alertas_monto,
+        'alertas_operador': alertas_operador, 'alertas_formato': alertas_formato,
+        'comisiones_sin_cuenta': comisiones_sin_cuenta,
+    }
+
+# ─── Clasificación de contactos ───────────────────────────────────────────────
+def clasificar_contactos(df_work, df_comision, refs, rl):
+    ref_to_dbid      = refs['ref_to_dbid']
+    ref_to_nif       = refs['ref_to_nif']
+    nif_to_dbid      = refs['nif_to_dbid']
+    nif_to_ref       = refs['nif_to_ref']
+    ref_to_odoo_datos = refs['ref_to_odoo_datos']
+
+    frames = []
+    if not df_work.empty:    frames.append(df_work[~df_work['sin_datos']])
+    if not df_comision.empty: frames.append(df_comision[~df_comision['sin_datos']])
+    if not frames:
+        return [], [], [], [], []
+    df_all = pd.concat(frames, ignore_index=True).drop_duplicates('id_cuenta')
+
+    casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro = [], [], [], [], []
+
+    for _, row in df_all.iterrows():
+        id_c        = row['id_cuenta']
+        rut_billing = row['RUT_billing']
+        rut_odoo    = row['RUT_odoo']
+        ref_en_odoo = id_c in ref_to_dbid
+        rut_en_odoo = limpiar_rut(rut_billing) in nif_to_dbid
+
+        if ref_en_odoo:
+            if limpiar_rut(rut_billing) == limpiar_rut(rut_odoo):
+                casos_ok.append(id_c)
+                datos_odoo   = ref_to_odoo_datos.get(id_c, {})
+                campos_b     = {'razon_social': row['razon_social'], 'giro': row['giro'],
+                                'domicilio': row['domicilio'], 'comuna': row['comuna']}
+                diffs = {}
+                for campo, val_b in campos_b.items():
+                    val_o = datos_odoo.get(campo, '')
+                    if not es_vacio(val_b) and normalizar(val_b) != normalizar(val_o):
+                        diffs[campo] = {'billing': val_b, 'odoo': val_o}
+                if diffs:
+                    casos_dc.append({
+                        'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                        'db_id': row['db_id'], 'RUT': rut_billing,
+                        'razon_social': row['razon_social'], 'diffs': diffs
+                    })
+            else:
+                casos_act.append({
+                    'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                    'RUT_billing': rut_billing, 'RUT_odoo': rut_odoo,
+                    'razon_social': row['razon_social'], 'db_id': row['db_id'],
+                    'giro': row['giro'], 'domicilio': row['domicilio'],
+                    'comuna': row['comuna'], 'email': row['email'],
+                    'region': buscar_region(row['comuna'], rl)
+                })
+        elif rut_en_odoo:
+            rut_clean  = limpiar_rut(rut_billing)
+            ref_exist  = nif_to_ref.get(rut_clean, '')
+            dbid_exist = nif_to_dbid.get(rut_clean, '')
+            casos_rut_otro.append({
+                'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                'RUT': rut_billing, 'razon_social': row['razon_social'],
+                'db_id_existente': dbid_exist, 'ref_existente': ref_exist
+            })
+            casos_crear.append({
+                'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                'RUT': rut_billing, 'razon_social': row['razon_social'],
+                'giro': row['giro'], 'domicilio': row['domicilio'],
+                'comuna': row['comuna'], 'email': row['email'],
+                'region': buscar_region(row['comuna'], rl),
+                'rut_ya_existe': True,
+                'ref_existente': ref_exist, 'db_id_existente': dbid_exist
+            })
+        else:
+            casos_crear.append({
+                'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                'RUT': rut_billing, 'razon_social': row['razon_social'],
+                'giro': row['giro'], 'domicilio': row['domicilio'],
+                'comuna': row['comuna'], 'email': row['email'],
+                'region': buscar_region(row['comuna'], rl)
+            })
+
+    return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro
+
+# ─── Generación Excel de Contactos ───────────────────────────────────────────
+def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl):
+    wb = Workbook()
+    cont_headers  = ['Nombre','Tipo de compañía','Empresa relacionada','Nombre de la calle','Ciudad',
+                     'Provincia','Idioma','País','Tipo de identificación','NIF','Tipo de contribuyente',
+                     'Giro','Correo DTE','Correo electrónico','Referencia','Compañía','Enlace a página web']
+    campos_criticos = {1:'razon_social',4:'domicilio',5:'comuna',6:'region',10:'RUT',12:'giro',13:'email',14:'email'}
+
+    ws = wb.active; ws.title = 'Importación Clientes CL'
+    aplicar_header(ws, cont_headers, [40,15,20,35,20,25,18,10,20,15,25,30,35,35,15,20,40])
+    h18 = ws.cell(row=1, column=18, value='⚠ Nota (no importar)')
+    h18.fill = PatternFill('solid', start_color='FFF2CC')
+    h18.font = Font(bold=True, name='Arial', size=10, color='7F6000')
+    ws.column_dimensions['R'].width = 55
+    h19 = ws.cell(row=1, column=19, value='Validación Comuna SII')
+    h19.fill = PatternFill('solid', start_color='D9E1F2')
+    h19.font = Font(bold=True, name='Arial', size=10)
+    h19.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ws.column_dimensions['S'].width = 22
+
+    # Dedup por id_cuenta
+    id_vistos, casos_dedup = set(), []
+    for c in casos_crear:
+        if c['id_cuenta'] not in id_vistos:
+            id_vistos.add(c['id_cuenta']); casos_dedup.append(c)
+
+    for row_idx, c in enumerate(casos_dedup, 2):
+        rut_d    = c['RUT'] if c['RUT'] != 'NO ENCONTRADO' else ''
+        es_caso4 = c.get('rut_ya_existe', False)
+        data = [c['razon_social'],'Compañía','',c['domicilio'],c['comuna'],c['region'],
+                'Spanish / Español','Chile','RUT',rut_d,'IVA afecto 1ª categoría',
+                c['giro'],c['email'],c['email'],c['id_cuenta'],'Anser Indicus SPA',
+                f"https://dash.fu.do/accounts/{c['id_cuenta']}"]
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = Font(name='Arial', size=10)
+            cell.alignment = Alignment(vertical='center')
+            if es_caso4: cell.fill = yellow_fill
+        if es_caso4:
+            nota = (f"⚠ Ya existe otra Referencia en Odoo "
+                    f"(Ref: {c.get('ref_existente','?')} | DB_ID: {c.get('db_id_existente','?')}). "
+                    f"Verificar si es el mismo cliente.")
+            cn = ws.cell(row=row_idx, column=18, value=nota)
+            cn.font = Font(name='Arial', size=9, color='7F6000')
+            cn.fill = yellow_fill
+            cn.alignment = Alignment(vertical='center', wrap_text=True)
+        # Validación SII
+        com_v = str(c['comuna'] or '').strip()
+        if len(com_v) > 20:
+            cv = ws.cell(row=row_idx, column=19, value='SUPERA LÍMITE SII')
+            cv.fill = PatternFill('solid', start_color='FF0000')
+            cv.font = Font(name='Arial', size=9, color='FFFFFF', bold=True)
+            cv.alignment = Alignment(horizontal='center', vertical='center')
+            ws.cell(row=row_idx, column=5).fill = field_red
+            ws.cell(row=row_idx, column=5).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
+        else:
+            cv = ws.cell(row=row_idx, column=19, value='OK')
+            cv.fill = green_fill
+            cv.font = Font(name='Arial', size=9, color='375623')
+            cv.alignment = Alignment(horizontal='center', vertical='center')
+        # Campos críticos vacíos
+        row_data = {'razon_social':c['razon_social'],'domicilio':c['domicilio'],
+                    'comuna':c['comuna'],'region':c['region'],'RUT':c['RUT'],
+                    'giro':c['giro'],'email':c['email']}
+        for col_idx, campo in campos_criticos.items():
+            if es_vacio(row_data.get(campo, '')):
+                ws.cell(row=row_idx, column=col_idx).fill = field_red
+                ws.cell(row=row_idx, column=col_idx).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
+
+    ws.cell(row=len(casos_dedup)+3, column=1, value='NOTAS:').font = Font(bold=True, name='Arial')
+    ws.cell(row=len(casos_dedup)+3, column=2,
+        value='🔴 Fila roja = sin RUT | 🟥 Celda roja = campo vacío | 🟨 Fila amarilla = RUT ya existe | 🔴S = SUPERA LÍMITE SII'
+    ).font = Font(name='Arial', color='CC5500')
+
+    # Contactos a actualizar + sección en importación
+    if casos_act:
+        ws_act = wb.create_sheet('⚠ Contactos a actualizar')
+        aplicar_header(ws_act,
+            ['ID Cuenta','Nombre en MP','Razón Social (billing)','RUT billing','RUT en Odoo','DB_ID Odoo','Acción requerida'],
+            [12,30,35,18,18,12,55])
+        ws_act.cell(row=1, column=7).fill = PatternFill('solid', start_color='CC0000')
+        for row_idx, c in enumerate(casos_act, 2):
+            accion = f"1) Cambiar Referencia a '{c['id_cuenta']}_old'  |  2) Crear contacto nuevo"
+            for col_idx, val in enumerate([c['id_cuenta'],c['nombre_cuenta'],c['razon_social'],
+                                           c['RUT_billing'],c['RUT_odoo'],c['db_id'],accion], 1):
+                cell = ws_act.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = red_fill
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+            ws_act.row_dimensions[row_idx].height = 35
+        # Agregar sección en hoja principal
+        next_row = len(casos_dedup) + 5
+        ws.cell(row=next_row, column=1,
+            value='CONTACTOS A ACTUALIZAR:').font = Font(bold=True, name='Arial', size=10, color='CC0000')
+        next_row += 1
+        for c in casos_act:
+            rut_d = c['RUT_billing'] if c['RUT_billing'] != 'NO ENCONTRADO' else ''
+            data = [c['razon_social'],'Compañía','',c['domicilio'],c['comuna'],c['region'],
+                    'Spanish / Español','Chile','RUT',rut_d,'IVA afecto 1ª categoría',
+                    c['giro'],c['email'],c['email'],c['id_cuenta'],'Anser Indicus SPA',
+                    f"https://dash.fu.do/accounts/{c['id_cuenta']}"]
+            for col_idx, val in enumerate(data, 1):
+                cell = ws.cell(row=next_row, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = orange_fill
+                cell.alignment = Alignment(vertical='center')
+            com_act = str(c['comuna'] or '').strip()
+            if len(com_act) > 20:
+                cv2 = ws.cell(row=next_row, column=19, value='SUPERA LÍMITE SII')
+                cv2.fill = PatternFill('solid', start_color='FF0000')
+                cv2.font = Font(name='Arial', size=9, color='FFFFFF', bold=True)
+                cv2.alignment = Alignment(horizontal='center', vertical='center')
+                ws.cell(row=next_row, column=5).fill = field_red
+            else:
+                cv2 = ws.cell(row=next_row, column=19, value='OK')
+                cv2.fill = green_fill
+                cv2.font = Font(name='Arial', size=9, color='375623')
+                cv2.alignment = Alignment(horizontal='center', vertical='center')
+            next_row += 1
+
+    # RUT existe otro ID
+    if casos_rut_otro:
+        ws_rut = wb.create_sheet('⚠ RUT existe - otro ID')
+        aplicar_header(ws_rut,
+            ['ID Cuenta (nuevo)','Nombre en MP','RUT','Razón Social','DB_ID existente','Referencia existente','Acción'],
+            [14,30,18,35,14,20,45])
+        for row_idx, c in enumerate(casos_rut_otro, 2):
+            accion = f"RUT ya existe con Referencia '{c['ref_existente']}'. Verificar si es el mismo cliente."
+            for col_idx, val in enumerate([c['id_cuenta'],c['nombre_cuenta'],c['RUT'],
+                                           c['razon_social'],c['db_id_existente'],c['ref_existente'],accion], 1):
+                cell = ws_rut.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = blue_fill
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+            ws_rut.row_dimensions[row_idx].height = 35
+
+    # Mismo RUT varios IDs
+    rut_counts = {}
+    for c in casos_crear:
+        rk = limpiar_rut(c['RUT'])
+        rut_counts.setdefault(rk, []).append(c)
+    rut_multi = {k: v for k, v in rut_counts.items() if len(v) > 1}
+    if rut_multi:
+        ws_m = wb.create_sheet('⚠ Mismo RUT - varios IDs')
+        aplicar_header(ws_m, ['RUT','Razón Social','IDs de cuenta','Nombres en MP'], [18,35,30,40])
+        for row_idx, (rk, items) in enumerate(rut_multi.items(), 2):
+            ids    = [i['id_cuenta'] for i in items]
+            noms   = [i['nombre_cuenta'] for i in items]
+            for col_idx, val in enumerate([rk, items[0]['razon_social'], ', '.join(ids), ', '.join(noms)], 1):
+                cell = ws_m.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = orange_fill
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+            ws_m.row_dimensions[row_idx].height = 30
+
+    # Datos cambiados
+    if casos_dc:
+        ws_dc = wb.create_sheet('⚠ Datos actualizados')
+        aplicar_header(ws_dc,
+            ['ID Cuenta','DB_ID Odoo','RUT','Nombre','Campo','Valor en billing','Valor en Odoo'],
+            [14,12,18,30,18,40,40])
+        ws_dc.cell(row=1, column=1).fill = PatternFill('solid', start_color='FF6600')
+        fila_dc = 2
+        labels = {'razon_social':'Razón Social','giro':'Giro','domicilio':'Domicilio','comuna':'Comuna'}
+        for c in casos_dc:
+            primera = True
+            for campo, vals in c['diffs'].items():
+                rv = [c['id_cuenta'] if primera else '', c['db_id'] if primera else '',
+                      c['RUT'] if primera else '', c['nombre_cuenta'] if primera else '',
+                      labels.get(campo, campo), vals['billing'], vals['odoo']]
+                for col_idx, val in enumerate(rv, 1):
+                    cell = ws_dc.cell(row=fila_dc, column=col_idx, value=val)
+                    cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
+                    cell.alignment = Alignment(vertical='center', wrap_text=True)
+                fila_dc += 1; primera = False
+
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    return output
+
+# ─── Generación Excel de Facturación ─────────────────────────────────────────
+def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_operador, alertas_formato):
+    fecha_hoy = date.today().strftime('%d/%m/%Y')
+    wb = Workbook()
+
+    # ── Hoja Terminales ──
+    fact_headers = ['Orden','Contacto/Id. de la DB','Referencia','Fecha de Factura/Recibo','Fecha vencimiento',
+                    'Referencia de Pago','Diario','Tipo de Documento','Líneas de factura/Producto',
+                    'Líneas de factura/Cuenta','Líneas de factura/Cantidad mínima',
+                    'Líneas de factura/Precio unitario','Líneas de factura/Impuesto',
+                    'Líneas de factura/Descuento (%)']
+    ws1 = wb.active; ws1.title = 'Terminales'
+    aplicar_header(ws1, fact_headers, [8,15,35,22,18,25,20,20,30,38,12,15,30,12])
+
+    orden = 1; prev_opid = None
+    for row_idx, (_, row) in enumerate(df_work.iterrows(), 2):
+        es_primera = row['operation_id'] != prev_opid
+        if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
+        else: orden_val = ''
+        tipo_doc    = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
+        nombre_ref  = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+        contacto_v  = row['db_id'] if row['db_id'] != 'ND' else ''
+        if es_primera:
+            data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
+                    fecha_hoy, fecha_hoy, f"'{row['operation_id']}",
+                    'Factura Electrónica', tipo_doc, PROD_TERM, CTA_TERM,
+                    int(row['cantidad']), PRECIO_UNIT, 'IVA 19 Venta', row['descuento']]
+        else:
+            data = ['','','','','','','','', PROD_TERM, CTA_TERM,
+                    int(row['cantidad']), PRECIO_UNIT, 'IVA 19 Venta', row['descuento']]
+        for col_idx, val in enumerate(data, 1):
+            cell = ws1.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = Font(name='Arial', size=10); cell.alignment = Alignment(vertical='center')
+        if row['sin_datos']:
+            for c in range(1, 15): ws1.cell(row=row_idx, column=c).fill = red_fill
+        elif row['db_id'] == 'ND':
+            ws1.cell(row=row_idx, column=2).fill = orange_fill
+        if row['monto_diferente']:
+            ws1.cell(row=row_idx, column=6).fill = yellow_fill
+            ws1.cell(row=row_idx, column=11).fill = yellow_fill
+
+    # ── Hoja Comisiones ──
+    if rows_comision:
+        ws_com = wb.create_sheet('Comisiones')
+        com_headers = ['Orden','Contacto/Id. de la DB','Referencia',
+                       'Fecha de Factura/Recibo','Fecha vencimiento','Referencia de Pago',
+                       'Términos y condiciones','Diario','Tipo de Documento',
+                       'Líneas de factura/Producto','Líneas de factura/Cuenta',
+                       'Líneas de factura/Cantidad mínima','Líneas de factura/Precio unitario',
+                       'Líneas de factura/Impuesto','Líneas de factura/Descuento (%)']
+        aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
+        for row_idx, rc in enumerate(rows_comision, 2):
+            tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
+            nombre_ref_c = rc['nombre_billing'] if rc['nombre_billing'] else rc['nombre_cuenta']
+            data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
+                      nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
+                      rc['terminos'], 'Factura Electrónica', tipo_doc_c,
+                      PROD_COM, CTA_COM, 1, rc['precio_sin_iva'], 'IVA 19 Venta', 0]
+            for col_idx, val in enumerate(data_c, 1):
+                cell = ws_com.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.alignment = Alignment(vertical='center')
+            if rc['sin_datos']:
+                for c in range(1, 16): ws_com.cell(row=row_idx, column=c).fill = red_fill
+            elif rc['db_id'] == 'ND':
+                ws_com.cell(row=row_idx, column=2).fill = orange_fill
+
+    # ── Hoja Comisiones sin cuenta ──
+    if 'comisiones_sin_cuenta' in st.session_state.get('resultado', {}):
+        csc = st.session_state['resultado']['comisiones_sin_cuenta']
+        if csc:
+            ws_ce = wb.create_sheet('⚠ Comisiones sin cuenta')
+            aplicar_header(ws_ce,
+                ['External Reference','Slug extraído','Operation ID','Monto','Fecha','Acción'],
+                [35,25,20,14,14,45])
+            for row_idx, e in enumerate(csc, 2):
+                for col_idx, val in enumerate([e['extref'],e['slug'],f"'{e['operation_id']}",
+                                               e['monto'],e['fecha'],
+                                               "No se encontró cuenta en accounts.csv — verificar manual"], 1):
+                    cell = ws_ce.cell(row=row_idx, column=col_idx, value=val)
+                    cell.font = Font(name='Arial', size=10); cell.fill = red_fill
+                    cell.alignment = Alignment(vertical='center', wrap_text=True)
+                ws_ce.row_dimensions[row_idx].height = 30
+
+    # ── Hoja Resumen ──
+    ws_r = wb.create_sheet('Resumen')
+    ws_r.column_dimensions['A'].width = 45
+    ws_r.column_dimensions['B'].width = 18
+    ws_r.column_dimensions['C'].width = 35
+    t1 = ws_r.cell(row=1, column=1, value='RESUMEN DE FACTURACIÓN')
+    t1.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
+    t1.fill = header_fill; t1.alignment = Alignment(horizontal='center', vertical='center')
+    ws_r.merge_cells('A1:C1'); ws_r.row_dimensions[1].height = 24
+    ws_r.cell(row=2, column=1, value=f"Fecha: {fecha_hoy}").font = Font(italic=True, name='Arial', size=10, color='666666')
+
+    def bloque(fila, label, valor, fill, nota=''):
+        c1 = ws_r.cell(row=fila, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=11); c1.fill = fill
+        c1.alignment = Alignment(vertical='center', horizontal='right')
+        c1.border = Border(outline=Side(style='thin'))
+        c2 = ws_r.cell(row=fila, column=2, value=valor)
+        c2.font = Font(bold=True, name='Arial', size=12, color='1F4E79'); c2.fill = fill
+        c2.number_format = '$#,##0'; c2.alignment = Alignment(horizontal='center', vertical='center')
+        c2.border = Border(outline=Side(style='thin'))
+        if nota: ws_r.cell(row=fila, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+
+    total_term = calc_total_df(df_work)
+    df_ok_t    = df_work[~df_work['sin_datos']] if not df_work.empty else pd.DataFrame()
+    df_nd_t    = df_work[df_work['sin_datos']]  if not df_work.empty else pd.DataFrame()
+    total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
+    bloque(4, 'TOTAL COMPLETO (con IVA)', total_term + total_com, total_fill)
+    if not df_work.empty:
+        bloque(6, 'Terminales — listas para importar', calc_total_df(df_ok_t), green_fill,
+               f'→ {df_ok_t["operation_id"].nunique()} facturas' if not df_ok_t.empty else '')
+        bloque(7, 'Terminales — sin datos', calc_total_df(df_nd_t), red_fill,
+               f'→ {df_nd_t["operation_id"].nunique()} facturas' if not df_nd_t.empty else '')
+    if rows_comision:
+        com_ok = [r for r in rows_comision if not r['sin_datos']]
+        com_nd = [r for r in rows_comision if r['sin_datos']]
+        bloque(8, 'Comisiones — listas para importar',
+               round(sum(r['monto_real'] for r in com_ok)), blue_fill, f'→ {len(com_ok)} factura(s)')
+        if com_nd:
+            bloque(9, 'Comisiones — sin datos (billing)',
+                   round(sum(r['monto_real'] for r in com_nd)), red_fill, f'→ {len(com_nd)} factura(s)')
+
+    fila_det = 14
+    if alertas_operador:
+        ws_r.cell(row=fila_det, column=1,
+            value=f'⚠ {len(alertas_operador)} pagos sin referencia:').font = Font(bold=True, name='Arial', size=10, color='CC5500')
+        fila_det += 1
+        for a in alertas_operador:
+            for col, val in enumerate([a['fecha'],a['operador'],a['descripcion'],a['monto'],f"'{a['operation_id']}"], 1):
+                cell = ws_r.cell(row=fila_det, column=col, value=val)
+                cell.font = Font(name='Arial', size=9); cell.fill = PatternFill('solid', start_color='FFF2CC')
+                if col == 4: cell.number_format = '$#,##0'
+            fila_det += 1
+        fila_det += 1
+
+    if alertas_formato:
+        ws_r.cell(row=fila_det, column=1,
+            value=f'⚠ {len(alertas_formato)} filas con formato no reconocido:').font = Font(bold=True, name='Arial', size=10, color='CC5500')
+        fila_det += 1
+        for a in alertas_formato:
+            for col, val in enumerate([a['fecha'],a['descripcion'],a['extref'],a['monto'],f"'{a['operation_id']}"], 1):
+                cell = ws_r.cell(row=fila_det, column=col, value=val)
+                cell.font = Font(name='Arial', size=9); cell.fill = PatternFill('solid', start_color='FFF2CC')
+                if col == 4: cell.number_format = '$#,##0'
+            fila_det += 1
+
+    # ── Alertas Monto ──
+    if alertas_monto:
+        ws_al = wb.create_sheet('⚠ Alertas Monto')
+        aplicar_header(ws_al,
+            ['Cuenta','ID','Operation ID','Monto esperado','Monto real','Diferencia','Acción'],
+            [30,10,18,16,16,14,45])
+        for row_idx, a in enumerate(alertas_monto, 2):
+            for col_idx, val in enumerate([a['nombre'],a['id_cuenta'],f"'{a['operation_id']}",
+                                           a['monto_esperado'],a['monto_real'],a['diferencia'],
+                                           'Verificar con ejecutivo'], 1):
+                cell = ws_al.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
+                if col_idx in [4,5,6]: cell.number_format = '$#,##0'
+
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    return output
+
+# ─── UI Principal ─────────────────────────────────────────────────────────────
+def main():
+    if not check_password():
+        return
+
+    rl = cargar_regiones()
+
+    # Header
+    col_logo, col_titulo = st.columns([1, 6])
+    with col_titulo:
+        st.title("🧾 Facturación Terminales")
+        st.caption("Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago")
+    st.divider()
+
+    # ── Sidebar ──────────────────────────────────────────────────
+    with st.sidebar:
+        st.header("¿Qué vas a procesar?")
+        if st.button("🔒 Cerrar sesión", use_container_width=True):
+            st.session_state["authenticated"] = False
+            st.rerun()
+        modo = st.radio("", [
+            "📋  PASO 1 — Solo gestionar contactos",
+            "🖥️  PASO 2 — Facturar terminales",
+            "💰  PASO 2 — Facturar comisiones",
+            "⚡  PASO 2 — Facturar todo",
+        ], label_visibility="collapsed")
+        st.divider()
+        st.markdown("""
+        **Leyenda colores en Excel:**
+        🔴 Fila roja = sin datos
+        🟠 Naranja = sin DB_ID
+        🟡 Amarillo = verificar
+        🟢 Verde = OK
+        """)
+        st.caption("v1.0 · Facturación Terminales")
+
+    hacer_terminales  = "terminales" in modo.lower() or "todo" in modo.lower()
+    hacer_comisiones  = "comisiones" in modo.lower() or "todo" in modo.lower()
+    es_paso1          = "PASO 1" in modo
+    # En PASO 1 procesar todo para clasificar contactos correctamente
+    proc_term = hacer_terminales or es_paso1
+    proc_com  = hacer_comisiones or es_paso1
+
+    # ── File uploaders ────────────────────────────────────────────
+    st.subheader("📁 Archivos")
+    col1, col2 = st.columns(2)
+    with col1:
+        f_col = st.file_uploader(
+            "Collection Mercado Pago  *(requerido)*",
+            type=['xlsx','csv'],
+            help="collection-FECHA.xlsx exportado de Mercado Pago")
+        f_bil = st.file_uploader(
+            "Billing data  *(requerido)*",
+            type=['csv','xlsx'],
+            help="billing_data_FECHA.csv exportado de dash (fu.do)")
+    with col2:
+        f_con = st.file_uploader(
+            "Contactos Odoo — res.partner  *(requerido)*",
+            type=['xlsx'],
+            help="Exportación de contactos desde Odoo")
+        f_odo = st.file_uploader(
+            "Asiento contable Odoo  *(requerido)*",
+            type=['xlsx'],
+            help="Para detectar facturas ya procesadas")
+
+    if proc_com:
+        st.subheader("📁 Adicional para comisiones")
+        f_acc = st.file_uploader(
+            "Accounts CSV  *(necesario para 'Deuda por comisiones')*",
+            type=['csv'],
+            help="accounts_FECHA.csv exportado del dashboard de fu.do")
+    else:
+        f_acc = None
+
+    # ── Botón de procesamiento ────────────────────────────────────
+    st.divider()
+    archivos_ok = all([f_col, f_bil, f_con, f_odo])
+    if not archivos_ok:
+        faltantes = []
+        if not f_col: faltantes.append("Collection")
+        if not f_bil: faltantes.append("Billing data")
+        if not f_con: faltantes.append("Contactos Odoo")
+        if not f_odo: faltantes.append("Asiento contable")
+        st.info(f"⬆️ Subí los archivos requeridos para continuar: **{', '.join(faltantes)}**")
+
+    boton = st.button("🚀  Procesar", type="primary", use_container_width=True, disabled=not archivos_ok)
+
+    if boton:
+        with st.spinner("Leyendo archivos..."):
+            try:
+                df_c, cols     = leer_collection(f_col)
+                billing_raw    = leer_billing(f_bil)
+                refs           = leer_contactos(f_con)
+                ids_facturados = leer_odoo(f_odo)
+                slug_to_accid, slug_to_nombre = leer_accounts(f_acc) if f_acc else ({}, {})
+            except Exception as e:
+                st.error(f"❌ Error al leer archivos: {e}")
+                return
+
+        with st.spinner("Procesando collection..."):
+            resultado = procesar(
+                df_c, cols, billing_raw, refs, ids_facturados, rl,
+                slug_to_accid, slug_to_nombre,
+                hacer_terminales=proc_term,
+                hacer_comisiones=proc_com,
+            )
+            st.session_state['resultado'] = resultado
+
+        rows          = resultado['rows']
+        rows_comision = resultado['rows_comision']
+        dup_count     = len(resultado['duplicados'])
+        alertas_monto = resultado['alertas_monto']
+        alertas_op    = resultado['alertas_operador']
+        alertas_fmt   = resultado['alertas_formato']
+        csc           = resultado['comisiones_sin_cuenta']
+
+        df_work     = pd.DataFrame(rows)
+        df_comision = pd.DataFrame(rows_comision)
+
+        if df_work.empty and df_comision.empty and not csc:
+            st.warning("⚠️ No se encontraron filas para procesar en el collection.")
+            return
+
+        with st.spinner("Clasificando contactos..."):
+            casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro = clasificar_contactos(
+                df_work, df_comision, refs, rl
+            )
+
+        hay_contactos_nuevos   = len(casos_crear) > 0
+        hay_acciones_contactos = hay_contactos_nuevos or len(casos_act) > 0 or len(casos_dc) > 0
+
+        # ── Resultados ────────────────────────────────────────────
+        st.divider()
+        st.subheader("📊 Resultado")
+
+        # Métricas rápidas
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        total_term = calc_total_df(df_work)
+        total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
+        col_m1.metric("Terminales", f"${total_term:,.0f}",
+                      f"{df_work['operation_id'].nunique() if not df_work.empty else 0} facturas")
+        col_m2.metric("Comisiones", f"${total_com:,.0f}", f"{len(rows_comision)} facturas")
+        col_m3.metric("TOTAL", f"${total_term + total_com:,.0f}")
+        col_m4.metric("Duplicados excluidos", dup_count)
+
+        # Alertas
+        if hay_contactos_nuevos:
+            st.warning(f"⚠️ **{len(casos_crear)} contacto(s) nuevo(s)** sin ID en Odoo — se genera archivo de contactos.")
+        if casos_act:
+            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — requieren actualización manual.")
+        if casos_dc:
+            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos actualizados en billing data.")
+        if alertas_op:
+            st.warning(f"⚠️ **{len(alertas_op)} pago(s)** de comerciales sin referencia correcta — ver hoja Resumen.")
+        if alertas_fmt:
+            st.warning(f"⚠️ **{len(alertas_fmt)} fila(s)** con formato desconocido — ver hoja Resumen.")
+        if csc:
+            st.warning(f"⚠️ **{len(csc)} comisión(es)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
+        if alertas_monto:
+            st.warning(f"⚠️ **{len(alertas_monto)} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
+
+        # ── Descargas ─────────────────────────────────────────────
+        st.divider()
+        st.subheader("📥 Descargar archivos")
+        dl_col1, dl_col2 = st.columns(2)
+
+        # Archivo de contactos
+        if hay_acciones_contactos:
+            with st.spinner("Generando contactos.xlsx..."):
+                excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
+            nombre_cont = f"contactos_{date.today().strftime('%Y%m%d')}.xlsx"
+            with dl_col1:
+                st.download_button(
+                    label=f"📋 {nombre_cont}",
+                    data=excel_cont,
+                    file_name=nombre_cont,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    help="Importar en Odoo antes de facturar"
+                )
+        else:
+            with dl_col1:
+                st.success("✅ Todos los contactos ya están en Odoo")
+
+        # Archivo de facturación
+        if not es_paso1:
+            if hay_contactos_nuevos:
+                with dl_col2:
+                    st.warning("⚠️ Hay contactos sin ID — importá el archivo de contactos en Odoo primero, luego volvé a procesar con el nuevo archivo de contactos exportado.")
+            elif df_work.empty and not rows_comision:
+                with dl_col2:
+                    st.info("No hay filas para facturar.")
+            else:
+                with st.spinner("Generando Excel de facturación..."):
+                    excel_fact = generar_excel_facturacion(
+                        df_work if not df_work.empty else pd.DataFrame(columns=['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id','monto','RUT_billing','RUT_odoo','razon_social','nombre_billing','giro','domicilio','comuna','email','db_id','contacto_nombre','monto_diferente','sin_datos','es_consumidor_final','fecha_compra']),
+                        rows_comision, alertas_monto, alertas_op, alertas_fmt
+                    )
+                nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
+                with dl_col2:
+                    st.download_button(
+                        label=f"🧾 {nombre_fact}",
+                        data=excel_fact,
+                        file_name=nombre_fact,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        type="primary",
+                        help="Importar en Odoo para facturar"
+                    )
+        else:
+            # PASO 1 — mostrar instrucciones
+            st.info("""
+            **PASO 1 completado.** Para continuar:
+            1. Descargá el archivo de contactos (izquierda) y **importalo en Odoo**
+            2. Exportá el nuevo archivo de contactos desde Odoo
+            3. Volvé a esta página, seleccioná **PASO 2** y subí los archivos actualizados
+            """)
+
+        st.success("✅ Procesamiento completado")
+
+if __name__ == '__main__':
+    main()
