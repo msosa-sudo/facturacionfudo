@@ -870,113 +870,153 @@ def main():
 
     rl = cargar_regiones()
 
-    # Header
-    col_logo, col_titulo = st.columns([1, 6])
-    with col_titulo:
-        st.title("🧾 Facturación Terminales")
-        st.caption("Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago")
+    # ── Header ─────────────────────────────────────────────────
+    st.title("🧾 Facturación Terminales")
+    st.caption("Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago")
+
+    # ── Guía de uso ────────────────────────────────────────────
+    with st.expander("📖 Guía de uso — cómo funciona el procesador"):
+        st.markdown("""
+        ### Flujo de trabajo
+
+        **PASO 1 — Crear contactos**
+        Usalo cuando hay cuentas nuevas que todavía no están en Odoo.
+        1. Subí los 4 archivos requeridos y hacé clic en **Procesar**
+        2. Descargá el archivo `contactos_FECHA.xlsx` que genera el procesador
+        3. Importalo en Odoo: **Contactos → ⚙️ → Importar registros**
+        4. Una vez importado, **exportá el res.partner de nuevo desde Odoo** (ahora tiene los DB_IDs nuevos)
+        5. Con ese archivo actualizado, pasá al PASO 2
+
+        **PASO 2 — Facturar**
+        Usalo cuando todos los contactos ya están en Odoo con su DB_ID.
+        1. Seleccioná qué querés facturar: **Terminales** o **Deuda fija**
+        2. Subí los 4 archivos (con el res.partner actualizado de Odoo)
+        3. Si facturás **Deuda fija**, subí también el Accounts CSV
+        4. Hacé clic en **Procesar** y descargá `facturar_terminales_FECHA.xlsx`
+        5. Importalo en Odoo para crear las facturas
+
+        ---
+        ### Archivos requeridos
+
+        | Archivo | Dónde lo obtenés |
+        |---|---|
+        | **Collection Mercado Pago** | Portal Mercado Pago → Actividades → Exportar |
+        | **Billing data** | dash.fu.do → Exportar billing |
+        | **Contactos Odoo** (res.partner) | Odoo → Contactos → Exportar → res.partner |
+        | **Asiento contable** | Odoo → Contabilidad → Asientos → Exportar |
+        | **Accounts CSV** *(solo Deuda fija)* | dash.fu.do → Cuentas → Exportar |
+
+        ---
+        ### Colores en los archivos Excel
+
+        | Color | Significado |
+        |---|---|
+        | 🔴 Fila roja | Cuenta sin datos de facturación (sin RUT en billing) |
+        | 🟠 Celda naranja | Sin DB_ID en Odoo — no se puede importar todavía |
+        | 🟡 Celda amarilla | Verificar manualmente (monto diferente u otro aviso) |
+        | 🟢 OK / verde | Todo en orden |
+        | 🔴 SUPERA LÍMITE SII | La comuna tiene más de 20 caracteres — SII rechazará la factura |
+        """)
+
     st.divider()
 
-    # ── Sidebar ──────────────────────────────────────────────────
+    # ── Sidebar ────────────────────────────────────────────────
     with st.sidebar:
-        st.header("¿Qué vas a procesar?")
+        st.header("¿Qué vas a hacer?")
+
+        paso = st.radio("", [
+            "📋  PASO 1 — Crear contactos",
+            "🧾  PASO 2 — Facturar",
+        ], label_visibility="collapsed")
+
+        es_paso1 = "PASO 1" in paso
+
+        tipo_fact = "Terminales + Deuda fija"  # default (para PASO 1 procesar todo)
+        if not es_paso1:
+            st.markdown("**¿Qué querés facturar?**")
+            tipo_fact = st.selectbox("", [
+                "Terminales",
+                "Deuda fija",
+                "Terminales + Deuda fija",
+            ], label_visibility="collapsed")
+
+        st.divider()
+        st.markdown("""
+        **Leyenda Excel:**
+        🔴 sin datos · 🟠 sin DB_ID
+        🟡 verificar · 🟢 OK
+        """)
         if st.button("🔒 Cerrar sesión", use_container_width=True):
             st.session_state["authenticated"] = False
             st.rerun()
-        modo = st.radio("", [
-            "📋  PASO 1 — Solo gestionar contactos",
-            "🖥️  PASO 2 — Facturar terminales",
-            "💰  PASO 2 — Facturar comisiones",
-            "⚡  PASO 2 — Facturar todo",
-        ], label_visibility="collapsed")
-        st.divider()
-        st.markdown("""
-        **Leyenda colores en Excel:**
-        🔴 Fila roja = sin datos
-        🟠 Naranja = sin DB_ID
-        🟡 Amarillo = verificar
-        🟢 Verde = OK
-        """)
         st.caption("v1.0 · Facturación Terminales")
 
-    hacer_terminales  = "terminales" in modo.lower() or "todo" in modo.lower()
-    hacer_comisiones  = "comisiones" in modo.lower() or "todo" in modo.lower()
-    es_paso1          = "PASO 1" in modo
-    # En PASO 1 procesar todo para clasificar contactos correctamente
+    hacer_terminales = "Terminales" in tipo_fact
+    hacer_comisiones = "Deuda fija" in tipo_fact
     proc_term = hacer_terminales or es_paso1
     proc_com  = hacer_comisiones or es_paso1
 
-    # ── File uploaders ────────────────────────────────────────────
-    st.subheader("📁 Archivos")
+    # ── File uploaders ──────────────────────────────────────────
+    st.subheader("📁 Archivos requeridos")
     col1, col2 = st.columns(2)
     with col1:
         f_col = st.file_uploader(
-            "Collection Mercado Pago  *(requerido)*",
-            type=['xlsx','csv'],
+            "Collection Mercado Pago  *(requerido)*", type=['xlsx','csv'],
             help="collection-FECHA.xlsx exportado de Mercado Pago")
         f_bil = st.file_uploader(
-            "Billing data  *(requerido)*",
-            type=['csv','xlsx'],
-            help="billing_data_FECHA.csv exportado de dash (fu.do)")
+            "Billing data  *(requerido)*", type=['csv','xlsx'],
+            help="billing_data_FECHA.csv exportado de dash.fu.do")
     with col2:
         f_con = st.file_uploader(
-            "Contactos Odoo — res.partner  *(requerido)*",
-            type=['xlsx'],
-            help="Exportación de contactos desde Odoo")
+            "Contactos Odoo — res.partner  *(requerido)*", type=['xlsx'],
+            help="Exportación del modelo res.partner desde Odoo")
         f_odo = st.file_uploader(
-            "Asiento contable Odoo  *(requerido)*",
-            type=['xlsx'],
-            help="Para detectar facturas ya procesadas")
+            "Asiento contable Odoo  *(requerido)*", type=['xlsx'],
+            help="Para detectar facturas ya procesadas y evitar duplicados")
 
+    f_acc = None
     if proc_com:
-        st.subheader("📁 Adicional para comisiones")
+        st.subheader("📁 Adicional para Deuda fija")
         f_acc = st.file_uploader(
-            "Accounts CSV  *(necesario para 'Deuda por comisiones')*",
-            type=['csv'],
-            help="accounts_FECHA.csv exportado del dashboard de fu.do")
-    else:
-        f_acc = None
+            "Accounts CSV  *(necesario para Deuda fija)*", type=['csv'],
+            help="accounts_FECHA.csv exportado de dash.fu.do")
 
-    # ── Botón de procesamiento ────────────────────────────────────
+    # ── Botón ───────────────────────────────────────────────────
     st.divider()
     archivos_ok = all([f_col, f_bil, f_con, f_odo])
     if not archivos_ok:
-        faltantes = []
-        if not f_col: faltantes.append("Collection")
-        if not f_bil: faltantes.append("Billing data")
-        if not f_con: faltantes.append("Contactos Odoo")
-        if not f_odo: faltantes.append("Asiento contable")
-        st.info(f"⬆️ Subí los archivos requeridos para continuar: **{', '.join(faltantes)}**")
+        faltantes = [n for f, n in [(f_col,"Collection"),(f_bil,"Billing data"),
+                                    (f_con,"Contactos Odoo"),(f_odo,"Asiento contable")] if not f]
+        st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(faltantes)}**")
 
     boton = st.button("🚀  Procesar", type="primary", use_container_width=True, disabled=not archivos_ok)
 
     if boton:
+        # ── Lectura ──────────────────────────────────────────────
         with st.spinner("Leyendo archivos..."):
             try:
                 df_c, cols = leer_collection(f_col)
             except Exception as e:
-                st.error(f"❌ **Collection** ({f_col.name}): {e}")
-                return
+                st.error(f"❌ **Collection** ({f_col.name}): {e}"); return
             try:
                 billing_raw = leer_billing(f_bil)
             except Exception as e:
-                st.error(f"❌ **Billing data** ({f_bil.name}): {e}")
-                return
+                st.error(f"❌ **Billing data** ({f_bil.name}): {e}"); return
             try:
                 refs = leer_contactos(f_con)
             except Exception as e:
-                st.error(f"❌ **Contactos Odoo** ({f_con.name}): {e}")
-                return
+                st.error(f"❌ **Contactos Odoo** ({f_con.name}): {e}"); return
             try:
                 ids_facturados = leer_odoo(f_odo)
             except Exception as e:
-                st.error(f"❌ **Asiento contable** ({f_odo.name}): {e}")
-                return
+                st.error(f"❌ **Asiento contable** ({f_odo.name}): {e}"); return
             try:
                 slug_to_accid, slug_to_nombre = leer_accounts(f_acc) if f_acc else ({}, {})
             except Exception as e:
-                st.warning(f"⚠️ **Accounts CSV** ({f_acc.name if f_acc else ''}): {e} — se continúa sin comisiones")
+                st.warning(f"⚠️ **Accounts CSV**: {e} — se continúa sin Deuda fija")
+                slug_to_accid, slug_to_nombre = {}, {}
 
+        # ── Procesamiento ────────────────────────────────────────
         with st.spinner("Procesando collection..."):
             resultado = procesar(
                 df_c, cols, billing_raw, refs, ids_facturados, rl,
@@ -1009,33 +1049,29 @@ def main():
         hay_contactos_nuevos   = len(casos_crear) > 0
         hay_acciones_contactos = hay_contactos_nuevos or len(casos_act) > 0 or len(casos_dc) > 0
 
-        # ── Resultados ────────────────────────────────────────────
+        # ── Métricas ──────────────────────────────────────────────
         st.divider()
         st.subheader("📊 Resultado")
-
-        # Métricas rápidas
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         total_term = calc_total_df(df_work)
         total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
         col_m1.metric("Terminales", f"${total_term:,.0f}",
                       f"{df_work['operation_id'].nunique() if not df_work.empty else 0} facturas")
-        col_m2.metric("Comisiones", f"${total_com:,.0f}", f"{len(rows_comision)} facturas")
+        col_m2.metric("Deuda fija", f"${total_com:,.0f}", f"{len(rows_comision)} facturas")
         col_m3.metric("TOTAL", f"${total_term + total_com:,.0f}")
         col_m4.metric("Duplicados excluidos", dup_count)
 
-        # Alertas
-        if hay_contactos_nuevos:
-            st.warning(f"⚠️ **{len(casos_crear)} contacto(s) nuevo(s)** sin ID en Odoo — se genera archivo de contactos.")
+        # Alertas generales
         if casos_act:
-            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — requieren actualización manual.")
+            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — ver hoja '⚠ Contactos a actualizar'.")
         if casos_dc:
-            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos actualizados en billing data.")
+            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos actualizados en billing — ver hoja '⚠ Datos actualizados'.")
         if alertas_op:
-            st.warning(f"⚠️ **{len(alertas_op)} pago(s)** de comerciales sin referencia correcta — ver hoja Resumen.")
+            st.warning(f"⚠️ **{len(alertas_op)} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
         if alertas_fmt:
             st.warning(f"⚠️ **{len(alertas_fmt)} fila(s)** con formato desconocido — ver hoja Resumen.")
         if csc:
-            st.warning(f"⚠️ **{len(csc)} comisión(es)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
+            st.warning(f"⚠️ **{len(csc)} Deuda(s) fija(s)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
         if alertas_monto:
             st.warning(f"⚠️ **{len(alertas_monto)} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
 
@@ -1044,12 +1080,14 @@ def main():
         st.subheader("📥 Descargar archivos")
         dl_col1, dl_col2 = st.columns(2)
 
-        # Archivo de contactos
+        # Archivo de contactos (siempre que haya algo que reportar)
         if hay_acciones_contactos:
             with st.spinner("Generando contactos.xlsx..."):
                 excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
             nombre_cont = f"contactos_{date.today().strftime('%Y%m%d')}.xlsx"
             with dl_col1:
+                if hay_contactos_nuevos:
+                    st.warning(f"⚠️ {len(casos_crear)} contacto(s) nuevo(s) — importalos en Odoo")
                 st.download_button(
                     label=f"📋 {nombre_cont}",
                     data=excel_cont,
@@ -1062,39 +1100,67 @@ def main():
             with dl_col1:
                 st.success("✅ Todos los contactos ya están en Odoo")
 
-        # Archivo de facturación
-        if not es_paso1:
-            if hay_contactos_nuevos:
-                with dl_col2:
-                    st.warning("⚠️ Hay contactos sin ID — importá el archivo de contactos en Odoo primero, luego volvé a procesar con el nuevo archivo de contactos exportado.")
-            elif df_work.empty and not rows_comision:
-                with dl_col2:
-                    st.info("No hay filas para facturar.")
-            else:
-                with st.spinner("Generando Excel de facturación..."):
-                    excel_fact = generar_excel_facturacion(
-                        df_work if not df_work.empty else pd.DataFrame(columns=['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id','monto','RUT_billing','RUT_odoo','razon_social','nombre_billing','giro','domicilio','comuna','email','db_id','contacto_nombre','monto_diferente','sin_datos','es_consumidor_final','fecha_compra']),
-                        rows_comision, alertas_monto, alertas_op, alertas_fmt
-                    )
-                nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
-                with dl_col2:
-                    st.download_button(
-                        label=f"🧾 {nombre_fact}",
-                        data=excel_fact,
-                        file_name=nombre_fact,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        type="primary",
-                        help="Importar en Odoo para facturar"
-                    )
+        # Archivo de facturación / instrucciones
+        if es_paso1:
+            with dl_col2:
+                st.info(
+                    "**PASO 1 completado.**\n\n"
+                    "1. Descargá el archivo de contactos ←\n"
+                    "2. Importalo en Odoo (Contactos → Importar)\n"
+                    "3. Exportá el res.partner actualizado desde Odoo\n"
+                    "4. Volvé aquí, seleccioná **PASO 2** y subí el nuevo res.partner"
+                )
+        elif hay_contactos_nuevos:
+            with dl_col2:
+                # Mensaje claro explicando por qué no se generó la facturación
+                faltantes_lista = "\n".join(
+                    f"- **{c['nombre_cuenta']}** (ID: {c['id_cuenta']})"
+                    for c in casos_crear[:10]
+                )
+                if len(casos_crear) > 10:
+                    faltantes_lista += f"\n- ... y {len(casos_crear)-10} más"
+                st.error(
+                    f"⛔ **No se generó el archivo de facturación.**\n\n"
+                    f"El archivo de contactos de Odoo que subiste "
+                    f"(**{f_con.name}**) no incluye {len(casos_crear)} cuenta(s) "
+                    f"que aparecen en el collection. "
+                    f"Esto ocurre cuando subiste un res.partner anterior a la importación "
+                    f"de los contactos nuevos.\n\n"
+                    f"**Cuentas que faltan en Odoo:**\n{faltantes_lista}"
+                )
+                st.info(
+                    "**Qué tenés que hacer:**\n"
+                    "1. Descargá el archivo de contactos ← (botón de la izquierda)\n"
+                    "2. Importalo en Odoo (Contactos → Importar registros)\n"
+                    "3. En Odoo, exportá el res.partner de nuevo\n"
+                    "4. Subí ese nuevo export en el campo **Contactos Odoo** (arriba)\n"
+                    "5. Hacé clic en **Procesar** de nuevo"
+                )
+        elif df_work.empty and not rows_comision:
+            with dl_col2:
+                st.info("No hay filas para facturar en este collection.")
         else:
-            # PASO 1 — mostrar instrucciones
-            st.info("""
-            **PASO 1 completado.** Para continuar:
-            1. Descargá el archivo de contactos (izquierda) y **importalo en Odoo**
-            2. Exportá el nuevo archivo de contactos desde Odoo
-            3. Volvé a esta página, seleccioná **PASO 2** y subí los archivos actualizados
-            """)
+            empty_cols = ['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id',
+                          'monto','RUT_billing','RUT_odoo','razon_social','nombre_billing',
+                          'giro','domicilio','comuna','email','db_id','contacto_nombre',
+                          'monto_diferente','sin_datos','es_consumidor_final','fecha_compra']
+            with st.spinner("Generando Excel de facturación..."):
+                excel_fact = generar_excel_facturacion(
+                    df_work if not df_work.empty else pd.DataFrame(columns=empty_cols),
+                    rows_comision if hacer_comisiones else [],
+                    alertas_monto, alertas_op, alertas_fmt
+                )
+            nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
+            with dl_col2:
+                st.download_button(
+                    label=f"🧾 {nombre_fact}",
+                    data=excel_fact,
+                    file_name=nombre_fact,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    type="primary",
+                    help="Importar en Odoo para crear las facturas"
+                )
 
         st.success("✅ Procesamiento completado")
 
