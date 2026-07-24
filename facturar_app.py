@@ -191,8 +191,21 @@ def leer_collection(f):
             'fecha': col_fecha, 'op': col_op, 'extref': col_extref}
     return df_c, cols
 
+def _cols_disponibles(df, n=8):
+    return ', '.join(f'"{c}"' for c in list(df.columns)[:n])
+
 def leer_billing(f):
-    df = pd.read_csv(f, dtype={'ID': str})
+    df = pd.read_csv(f, dtype=str)
+    # Normalizar nombre de columnas (strip espacios)
+    df.columns = df.columns.str.strip()
+    requeridas = ['ID', 'Código', 'Razón social', 'Nombre', 'Giro', 'Domicilio', 'Comuna', 'Email']
+    faltantes  = [c for c in requeridas if c not in df.columns]
+    if faltantes:
+        raise ValueError(
+            f"**Billing data**: columna(s) no encontrada(s): {', '.join(faltantes)}\n\n"
+            f"Columnas que tiene el archivo: {_cols_disponibles(df)}\n\n"
+            f"Verificá que estés subiendo el archivo correcto (billing_data_FECHA.csv de dash.fu.do)"
+        )
     df['RUT_clean'] = (df['Código'].astype(str)
                        .str.replace('.', '', regex=False)
                        .str.replace('-', '', regex=False)
@@ -202,6 +215,15 @@ def leer_billing(f):
 
 def leer_contactos(f):
     df = pd.read_excel(f, dtype=str)
+    df.columns = df.columns.str.strip()
+    requeridas = ['ID', 'Referencia', 'NIF', 'Nombre']
+    faltantes  = [c for c in requeridas if c not in df.columns]
+    if faltantes:
+        raise ValueError(
+            f"**Contactos Odoo**: columna(s) no encontrada(s): {', '.join(faltantes)}\n\n"
+            f"Columnas que tiene el archivo: {_cols_disponibles(df)}\n\n"
+            f"Verificá que sea la exportación de res.partner de Odoo"
+        )
     df['Referencia_clean'] = df['Referencia'].astype(str).str.strip()
     df['NIF_clean'] = (df['NIF'].astype(str)
                        .str.replace('.', '', regex=False)
@@ -229,7 +251,15 @@ def leer_contactos(f):
 
 def leer_odoo(f):
     df = pd.read_excel(f)
-    rc = 'Referencia del pago' if 'Referencia del pago' in df.columns else 'Referencia de pago'
+    df.columns = df.columns.str.strip()
+    posibles = ['Referencia del pago', 'Referencia de pago', 'Referencia']
+    rc = next((c for c in posibles if c in df.columns), None)
+    if rc is None:
+        raise ValueError(
+            f"**Asiento contable**: no se encontró columna de referencia de pago.\n\n"
+            f"Columnas disponibles: {_cols_disponibles(df)}\n\n"
+            f"Verificá que sea la exportación de asientos contables de Odoo"
+        )
     return set(df[rc].astype(str).str.replace("'", "").str.strip().tolist())
 
 def leer_accounts(f):
@@ -923,14 +953,29 @@ def main():
     if boton:
         with st.spinner("Leyendo archivos..."):
             try:
-                df_c, cols     = leer_collection(f_col)
-                billing_raw    = leer_billing(f_bil)
-                refs           = leer_contactos(f_con)
+                df_c, cols = leer_collection(f_col)
+            except Exception as e:
+                st.error(f"❌ **Collection** ({f_col.name}): {e}")
+                return
+            try:
+                billing_raw = leer_billing(f_bil)
+            except Exception as e:
+                st.error(f"❌ **Billing data** ({f_bil.name}): {e}")
+                return
+            try:
+                refs = leer_contactos(f_con)
+            except Exception as e:
+                st.error(f"❌ **Contactos Odoo** ({f_con.name}): {e}")
+                return
+            try:
                 ids_facturados = leer_odoo(f_odo)
+            except Exception as e:
+                st.error(f"❌ **Asiento contable** ({f_odo.name}): {e}")
+                return
+            try:
                 slug_to_accid, slug_to_nombre = leer_accounts(f_acc) if f_acc else ({}, {})
             except Exception as e:
-                st.error(f"❌ Error al leer archivos: {e}")
-                return
+                st.warning(f"⚠️ **Accounts CSV** ({f_acc.name if f_acc else ''}): {e} — se continúa sin comisiones")
 
         with st.spinner("Procesando collection..."):
             resultado = procesar(
