@@ -782,9 +782,10 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
 
     # ── Hoja Resumen ──
     ws_r = wb.create_sheet('Resumen')
-    ws_r.column_dimensions['A'].width = 45
-    ws_r.column_dimensions['B'].width = 18
-    ws_r.column_dimensions['C'].width = 35
+    ws_r.column_dimensions['A'].width = 38
+    ws_r.column_dimensions['B'].width = 48
+    ws_r.column_dimensions['C'].width = 18
+    ws_r.column_dimensions['D'].width = 28
     t1 = ws_r.cell(row=1, column=1, value='RESUMEN DE FACTURACIÓN')
     t1.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
     t1.fill = header_fill; t1.alignment = Alignment(horizontal='center', vertical='center')
@@ -821,7 +822,78 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
             bloque(9, 'Comisiones — sin datos (billing)',
                    round(sum(r['monto_real'] for r in com_nd)), red_fill, f'→ {len(com_nd)} factura(s)')
 
-    fila_det = 14
+    # ── Cuentas sin datos ──────────────────────────────────────────────────────
+    fila_det = 11
+    if not df_nd_t.empty:
+        c_lbl = ws_r.cell(row=fila_det, column=1, value='Cuentas sin datos:')
+        c_lbl.font = Font(bold=True, name='Arial', size=10, color='CC0000')
+        fila_det += 1
+        seen_nd = set()
+        for _, row in df_nd_t.iterrows():
+            opid = row['operation_id']
+            if opid in seen_nd:
+                continue
+            seen_nd.add(opid)
+            op_rows_nd = df_nd_t[df_nd_t['operation_id'] == opid]
+            nombre_nd = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+            monto_nd = calc_total_df(op_rows_nd)
+            c1 = ws_r.cell(row=fila_det, column=1, value=f"• {nombre_nd} (ID {row['id_cuenta']})")
+            c1.font = Font(name='Arial', size=10); c1.fill = red_fill
+            c2 = ws_r.cell(row=fila_det, column=2, value=monto_nd)
+            c2.font = Font(name='Arial', size=10); c2.fill = red_fill
+            c2.number_format = '$#,##0'
+            fila_det += 1
+        fila_det += 1
+
+    # ── Detalle por fecha ──────────────────────────────────────────────────────
+    if not df_work.empty:
+        c_lbl2 = ws_r.cell(row=fila_det, column=1, value='Detalle por fecha:')
+        c_lbl2.font = Font(bold=True, name='Arial', size=11, color='1F4E79')
+        fila_det += 1
+
+        df_det = df_work.copy()
+        df_det['_fecha_dt'] = df_det['fecha_compra'].apply(parse_fecha_dt)
+        df_det = df_det.sort_values('_fecha_dt')
+
+        for fecha_str, grupo_fecha in df_det.groupby('fecha_compra', sort=False):
+            total_fecha = calc_total_df(grupo_fecha)
+            # Encabezado de fecha
+            c_fh = ws_r.cell(row=fila_det, column=1, value=f'📅 {fecha_str}')
+            c_fh.font = Font(bold=True, name='Arial', size=11, color='FFFFFF')
+            c_fh.fill = header_fill
+            c_fh.alignment = Alignment(vertical='center')
+            c_fv = ws_r.cell(row=fila_det, column=2, value=total_fecha)
+            c_fv.font = Font(bold=True, name='Arial', size=11, color='FFFFFF')
+            c_fv.fill = header_fill
+            c_fv.number_format = '$#,##0'
+            c_fv.alignment = Alignment(horizontal='center', vertical='center')
+            ws_r.cell(row=fila_det, column=3).fill = header_fill
+            ws_r.row_dimensions[fila_det].height = 20
+            fila_det += 1
+
+            # Filas individuales (una por operation_id único)
+            seen_op = set()
+            for _, row in grupo_fecha.iterrows():
+                opid = row['operation_id']
+                if opid in seen_op:
+                    continue
+                seen_op.add(opid)
+                op_rows = grupo_fecha[grupo_fecha['operation_id'] == opid]
+                nombre = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+                monto_op = calc_total_df(op_rows)
+                row_fill = red_fill if row['sin_datos'] else PatternFill('solid', start_color='FFFFFF')
+                c1 = ws_r.cell(row=fila_det, column=1, value=row['fecha_compra'])
+                c1.font = Font(name='Arial', size=10); c1.fill = row_fill
+                c2 = ws_r.cell(row=fila_det, column=2, value=f'Terminales - {nombre}')
+                c2.font = Font(name='Arial', size=10); c2.fill = row_fill
+                c3 = ws_r.cell(row=fila_det, column=3, value=monto_op)
+                c3.font = Font(name='Arial', size=10); c3.fill = row_fill
+                c3.number_format = '$#,##0'
+                fila_det += 1
+            fila_det += 1  # línea en blanco entre fechas
+
+        fila_det += 1  # espacio antes de alertas
+
     if alertas_operador:
         ws_r.cell(row=fila_det, column=1,
             value=f'⚠ {len(alertas_operador)} pagos sin referencia:').font = Font(bold=True, name='Arial', size=10, color='CC5500')
