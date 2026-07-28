@@ -15,11 +15,170 @@ from openpyxl.utils import get_column_letter
 
 # ─── Configuración ────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Facturación — Anser Indicus",
+    page_title="Facturación — Fudo",
     page_icon="🧾",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ─── Identidad visual Fudo ────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&display=swap');
+
+/* ── Tipografía global ── */
+html, body, [class*="css"], * {
+    font-family: 'Barlow', sans-serif !important;
+}
+
+/* ── Fondo principal ── */
+[data-testid="stAppViewContainer"] > .main {
+    background-color: #FFFFFF;
+}
+
+/* ── Títulos ── */
+h1 { color: #FF5023 !important; font-weight: 700 !important; }
+h2, h3 { color: #3938A0 !important; font-weight: 700 !important; }
+h4, h5, h6 { color: #3B3B3B !important; font-weight: 600 !important; }
+
+/* ── Texto general ── */
+p, label, span, div {
+    color: #3B3B3B;
+    font-family: 'Barlow', sans-serif !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background-color: #3938A0 !important;
+}
+[data-testid="stSidebar"] * {
+    color: #FFFFFF !important;
+    font-family: 'Barlow', sans-serif !important;
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: #FFFFFF !important;
+}
+[data-testid="stSidebar"] .stRadio label,
+[data-testid="stSidebar"] .stSelectbox label {
+    color: #FFFFFF !important;
+    font-weight: 600 !important;
+}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    color: #E1E1F5 !important;
+}
+
+/* ── Botón primario (Procesar) ── */
+.stButton > button[kind="primary"],
+button[kind="primary"] {
+    background-color: #FF5023 !important;
+    border: none !important;
+    color: #FFFFFF !important;
+    font-weight: 700 !important;
+    border-radius: 6px !important;
+    font-size: 15px !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #e04010 !important;
+}
+
+/* ── Botones secundarios ── */
+.stButton > button {
+    border-color: #3938A0 !important;
+    color: #3938A0 !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+}
+.stButton > button:hover {
+    background-color: #E1E1F5 !important;
+}
+
+/* ── Botones de descarga ── */
+.stDownloadButton > button {
+    background-color: #3938A0 !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    font-weight: 700 !important;
+    border-radius: 6px !important;
+}
+.stDownloadButton > button:hover {
+    background-color: #5F5FC4 !important;
+}
+.stDownloadButton > button[kind="primary"] {
+    background-color: #FF5023 !important;
+}
+.stDownloadButton > button[kind="primary"]:hover {
+    background-color: #e04010 !important;
+}
+
+/* ── Métricas ── */
+[data-testid="metric-container"] {
+    background-color: #E1E1F5 !important;
+    border-radius: 8px !important;
+    padding: 14px 16px !important;
+    border-left: 4px solid #3938A0 !important;
+}
+[data-testid="stMetricLabel"] * {
+    color: #3938A0 !important;
+    font-weight: 600 !important;
+}
+[data-testid="stMetricValue"] * {
+    color: #FF5023 !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMetricDelta"] * {
+    color: #5F5FC4 !important;
+}
+
+/* ── Expander ── */
+[data-testid="stExpander"] {
+    border: 1px solid #FF5023 !important;
+    border-radius: 6px !important;
+}
+[data-testid="stExpander"] summary {
+    color: #FF5023 !important;
+    font-weight: 700 !important;
+}
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    border: 1.5px dashed #5F5FC4 !important;
+    border-radius: 6px !important;
+    background-color: #FAFAFF !important;
+}
+[data-testid="stFileUploader"] * { color: #3B3B3B !important; }
+
+/* ── Formulario de login ── */
+[data-testid="stForm"] {
+    border: 1.5px solid #E1E1F5 !important;
+    border-radius: 10px !important;
+    padding: 24px !important;
+}
+
+/* ── Divisor ── */
+hr { border-color: #E1E1F5 !important; }
+
+/* ── Caption ── */
+.stCaption, small { color: #C6C6C6 !important; }
+
+/* ── Info / success / warning / error ── */
+[data-testid="stAlert"] * {
+    font-family: 'Barlow', sans-serif !important;
+}
+
+/* ── Tablas markdown ── */
+table { border-collapse: collapse; width: 100%; }
+th {
+    background-color: #3938A0 !important;
+    color: #FFFFFF !important;
+    font-weight: 700 !important;
+    padding: 8px 12px !important;
+}
+td { padding: 6px 12px !important; border-bottom: 1px solid #E1E1F5 !important; }
+tr:nth-child(even) td { background-color: #FAFAFF !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 def check_password():
@@ -28,11 +187,17 @@ def check_password():
         return True
 
     st.markdown("""
-    <div style="max-width:380px; margin:80px auto 0;">
+    <div style="max-width:400px; margin:80px auto 0; text-align:center;">
+        <div style="background:#FF5023; border-radius:10px; padding:28px 32px 20px; margin-bottom:24px;">
+            <span style="font-family:'Barlow',sans-serif; font-size:28px; font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
+                🧾 Facturación Fudo
+            </span><br>
+            <span style="font-family:'Barlow',sans-serif; font-size:13px; color:#FFC9BB; font-weight:400;">
+                Anser Indicus SPA — acceso restringido
+            </span>
+        </div>
+    </div>
     """, unsafe_allow_html=True)
-    st.title("🧾 Facturación Terminales")
-    st.caption("Anser Indicus SPA — acceso restringido")
-    st.divider()
 
     with st.form("login_form"):
         pwd = st.text_input("Contraseña", type="password", placeholder="••••••••")
@@ -943,8 +1108,16 @@ def main():
     rl = cargar_regiones()
 
     # ── Header ─────────────────────────────────────────────────
-    st.title("🧾 Facturación Terminales")
-    st.caption("Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago")
+    st.markdown("""
+    <div style="background:#FF5023; border-radius:10px; padding:22px 28px 16px; margin-bottom:8px;">
+        <span style="font-family:'Barlow',sans-serif; font-size:26px; font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
+            🧾 Facturación Terminales
+        </span><br>
+        <span style="font-family:'Barlow',sans-serif; font-size:13px; color:#FFC9BB; font-weight:400;">
+            Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Guía de uso ────────────────────────────────────────────
     with st.expander("📖 Guía de uso — cómo funciona el procesador"):
