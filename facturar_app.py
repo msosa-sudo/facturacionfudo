@@ -26,34 +26,46 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&display=swap');
 
-/* ── Tipografía ── */
-html, body, [class*="css"],
-input, textarea, select, button,
-[data-testid] p, [data-testid] label,
-[data-testid] span, [data-testid] div {
+/* ── Tipografía — EXCLUYE íconos de Material Symbols ── */
+html, body { font-family: 'Barlow', sans-serif !important; }
+p, label, input, textarea, select,
+[data-testid="stMarkdownContainer"],
+[data-testid="stText"],
+[data-testid="stAlert"],
+[data-testid="stMetricLabel"],
+[data-testid="stMetricValue"],
+[data-testid="stCaptionContainer"],
+button:not([data-testid="stFileUploaderDeleteBtn"]) {
     font-family: 'Barlow', sans-serif !important;
+}
+
+/* ── Preservar fuente de íconos Material (evita "uploadupload" y ".arro") ── */
+[data-testid="stIconMaterial"],
+span[class*="material"],
+span[class*="Material"] {
+    font-family: 'Material Symbols Rounded', 'Material Icons' !important;
 }
 
 /* ── Fondo ── */
 [data-testid="stAppViewContainer"] > .main { background-color: #FFFFFF; }
 
-/* ── Títulos (sin tocar emojis ni SVGs) ── */
-[data-testid="stMarkdownContainer"] h1,
-[data-testid="stHeadingWithActionElements"] h1 { color: #FF5023 !important; font-weight: 700 !important; }
-[data-testid="stMarkdownContainer"] h2,
-[data-testid="stMarkdownContainer"] h3,
-[data-testid="stHeadingWithActionElements"] h2,
-[data-testid="stHeadingWithActionElements"] h3 { color: #3938A0 !important; font-weight: 700 !important; }
+/* ── Títulos ── */
+h1 { color: #FF5023 !important; font-weight: 700 !important; }
+h2, h3 { color: #3938A0 !important; font-weight: 700 !important; }
+h4, h5, h6 { color: #3B3B3B !important; font-weight: 600 !important; }
 
 /* ── Sidebar ── */
 [data-testid="stSidebar"] { background-color: #3938A0 !important; }
-[data-testid="stSidebar"] p   { color: #FFFFFF !important; }
+[data-testid="stSidebar"] p,
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3  { color: #FFFFFF !important; }
+[data-testid="stSidebar"] h3 { color: #FFFFFF !important; }
 [data-testid="stSidebar"] label { color: #FFFFFF !important; font-weight: 600 !important; }
-[data-testid="stSidebar"] small,
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: #E1E1F5 !important; }
+/* Caption / email en sidebar — visible sobre fondo azul */
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+    color: #FFC9BB !important;
+    font-size: 12px !important;
+}
 
 /* ── Botón primario ── */
 button[data-testid="baseButton-primary"] {
@@ -72,21 +84,23 @@ button[data-testid="baseButton-secondary"] {
     color: #3938A0 !important;
     font-weight: 600 !important;
     border-radius: 6px !important;
-    background: transparent !important;
 }
 button[data-testid="baseButton-secondary"]:hover { background-color: #E1E1F5 !important; }
 
 /* ── Botones de descarga ── */
-[data-testid="stDownloadButton"] button[data-testid="baseButton-secondary"] {
+[data-testid="stDownloadButton"] button {
     background-color: #3938A0 !important;
     color: #FFFFFF !important;
     border: none !important;
+    font-weight: 700 !important;
+    border-radius: 6px !important;
 }
-[data-testid="stDownloadButton"] button[data-testid="baseButton-secondary"]:hover {
-    background-color: #5F5FC4 !important;
-}
+[data-testid="stDownloadButton"] button:hover { background-color: #5F5FC4 !important; }
 [data-testid="stDownloadButton"] button[data-testid="baseButton-primary"] {
     background-color: #FF5023 !important;
+}
+[data-testid="stDownloadButton"] button[data-testid="baseButton-primary"]:hover {
+    background-color: #e04010 !important;
 }
 
 /* ── Métricas ── */
@@ -99,17 +113,13 @@ button[data-testid="baseButton-secondary"]:hover { background-color: #E1E1F5 !im
 [data-testid="stMetricLabel"] label { color: #3938A0 !important; font-weight: 600 !important; }
 [data-testid="stMetricValue"]  div  { color: #FF5023 !important; font-weight: 700 !important; }
 
-/* ── Expander ── */
+/* ── Expander: solo borde, sin tocar summary ni íconos ── */
 [data-testid="stExpander"] details {
     border: 1.5px solid #FF5023 !important;
     border-radius: 8px !important;
-    overflow: hidden;
 }
-[data-testid="stExpander"] details > summary { padding: 10px 16px !important; }
-[data-testid="stExpander"] details > summary > span { color: #FF5023 !important; font-weight: 700 !important; }
-[data-testid="stExpander"] details > summary svg { stroke: #FF5023 !important; }
 
-/* ── File uploader: solo el drop zone, no el botón ── */
+/* ── File uploader ── */
 [data-testid="stFileUploaderDropzone"] {
     border: 1.5px dashed #5F5FC4 !important;
     border-radius: 6px !important;
@@ -120,13 +130,12 @@ button[data-testid="baseButton-secondary"]:hover { background-color: #E1E1F5 !im
 [data-testid="stForm"] {
     border: 1.5px solid #E1E1F5 !important;
     border-radius: 10px !important;
-    padding: 24px !important;
 }
 
 /* ── Divisor ── */
 hr { border-color: #E1E1F5 !important; opacity: 0.6; }
 
-/* ── Caption ── */
+/* ── Caption fuera del sidebar ── */
 [data-testid="stCaptionContainer"] p { color: #C6C6C6 !important; }
 
 /* ── Tablas markdown ── */
@@ -1168,8 +1177,16 @@ def main():
         """)
         user_email = st.session_state.get("user_email", "")
         if user_email:
-            st.caption(f"👤 {user_email}")
-        st.caption("v1.0 · Facturación Terminales")
+            st.markdown(
+                f'<p style="font-family:Barlow,sans-serif; font-size:12px; '
+                f'color:#FFC9BB; margin:0 0 2px 0;">👤 {user_email}</p>',
+                unsafe_allow_html=True
+            )
+        st.markdown(
+            '<p style="font-family:Barlow,sans-serif; font-size:11px; '
+            'color:#9B9BD4; margin:0;">v1.0 · Facturación Terminales</p>',
+            unsafe_allow_html=True
+        )
 
     hacer_terminales = "Terminales" in tipo_fact
     hacer_comisiones = "Deuda fija" in tipo_fact
