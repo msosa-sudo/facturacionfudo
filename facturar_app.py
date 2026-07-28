@@ -26,52 +26,37 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&display=swap');
 
-/* ── Tipografía global ── */
-html, body, [class*="css"], * {
+/* ── Tipografía ── */
+html, body, [class*="css"],
+input, textarea, select, button,
+[data-testid] p, [data-testid] label,
+[data-testid] span, [data-testid] div {
     font-family: 'Barlow', sans-serif !important;
 }
 
-/* ── Fondo principal ── */
-[data-testid="stAppViewContainer"] > .main {
-    background-color: #FFFFFF;
-}
+/* ── Fondo ── */
+[data-testid="stAppViewContainer"] > .main { background-color: #FFFFFF; }
 
-/* ── Títulos ── */
-h1 { color: #FF5023 !important; font-weight: 700 !important; }
-h2, h3 { color: #3938A0 !important; font-weight: 700 !important; }
-h4, h5, h6 { color: #3B3B3B !important; font-weight: 600 !important; }
-
-/* ── Texto general ── */
-p, label, span, div {
-    color: #3B3B3B;
-    font-family: 'Barlow', sans-serif !important;
-}
+/* ── Títulos (sin tocar emojis ni SVGs) ── */
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stHeadingWithActionElements"] h1 { color: #FF5023 !important; font-weight: 700 !important; }
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stHeadingWithActionElements"] h2,
+[data-testid="stHeadingWithActionElements"] h3 { color: #3938A0 !important; font-weight: 700 !important; }
 
 /* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    background-color: #3938A0 !important;
-}
-[data-testid="stSidebar"] * {
-    color: #FFFFFF !important;
-    font-family: 'Barlow', sans-serif !important;
-}
+[data-testid="stSidebar"] { background-color: #3938A0 !important; }
+[data-testid="stSidebar"] p   { color: #FFFFFF !important; }
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-    color: #FFFFFF !important;
-}
-[data-testid="stSidebar"] .stRadio label,
-[data-testid="stSidebar"] .stSelectbox label {
-    color: #FFFFFF !important;
-    font-weight: 600 !important;
-}
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-    color: #E1E1F5 !important;
-}
+[data-testid="stSidebar"] h3  { color: #FFFFFF !important; }
+[data-testid="stSidebar"] label { color: #FFFFFF !important; font-weight: 600 !important; }
+[data-testid="stSidebar"] small,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color: #E1E1F5 !important; }
 
-/* ── Botón primario (Procesar) ── */
-.stButton > button[kind="primary"],
-button[kind="primary"] {
+/* ── Botón primario ── */
+button[data-testid="baseButton-primary"] {
     background-color: #FF5023 !important;
     border: none !important;
     color: #FFFFFF !important;
@@ -79,37 +64,29 @@ button[kind="primary"] {
     border-radius: 6px !important;
     font-size: 15px !important;
 }
-.stButton > button[kind="primary"]:hover {
-    background-color: #e04010 !important;
-}
+button[data-testid="baseButton-primary"]:hover { background-color: #e04010 !important; }
 
-/* ── Botones secundarios ── */
-.stButton > button {
-    border-color: #3938A0 !important;
+/* ── Botón secundario ── */
+button[data-testid="baseButton-secondary"] {
+    border: 1.5px solid #3938A0 !important;
     color: #3938A0 !important;
     font-weight: 600 !important;
     border-radius: 6px !important;
+    background: transparent !important;
 }
-.stButton > button:hover {
-    background-color: #E1E1F5 !important;
-}
+button[data-testid="baseButton-secondary"]:hover { background-color: #E1E1F5 !important; }
 
 /* ── Botones de descarga ── */
-.stDownloadButton > button {
+[data-testid="stDownloadButton"] button[data-testid="baseButton-secondary"] {
     background-color: #3938A0 !important;
     color: #FFFFFF !important;
     border: none !important;
-    font-weight: 700 !important;
-    border-radius: 6px !important;
 }
-.stDownloadButton > button:hover {
+[data-testid="stDownloadButton"] button[data-testid="baseButton-secondary"]:hover {
     background-color: #5F5FC4 !important;
 }
-.stDownloadButton > button[kind="primary"] {
+[data-testid="stDownloadButton"] button[data-testid="baseButton-primary"] {
     background-color: #FF5023 !important;
-}
-.stDownloadButton > button[kind="primary"]:hover {
-    background-color: #e04010 !important;
 }
 
 /* ── Métricas ── */
@@ -119,37 +96,27 @@ button[kind="primary"] {
     padding: 14px 16px !important;
     border-left: 4px solid #3938A0 !important;
 }
-[data-testid="stMetricLabel"] * {
-    color: #3938A0 !important;
-    font-weight: 600 !important;
-}
-[data-testid="stMetricValue"] * {
-    color: #FF5023 !important;
-    font-weight: 700 !important;
-}
-[data-testid="stMetricDelta"] * {
-    color: #5F5FC4 !important;
-}
+[data-testid="stMetricLabel"] label { color: #3938A0 !important; font-weight: 600 !important; }
+[data-testid="stMetricValue"]  div  { color: #FF5023 !important; font-weight: 700 !important; }
 
 /* ── Expander ── */
-[data-testid="stExpander"] {
-    border: 1px solid #FF5023 !important;
-    border-radius: 6px !important;
+[data-testid="stExpander"] details {
+    border: 1.5px solid #FF5023 !important;
+    border-radius: 8px !important;
+    overflow: hidden;
 }
-[data-testid="stExpander"] summary {
-    color: #FF5023 !important;
-    font-weight: 700 !important;
-}
+[data-testid="stExpander"] details > summary { padding: 10px 16px !important; }
+[data-testid="stExpander"] details > summary > span { color: #FF5023 !important; font-weight: 700 !important; }
+[data-testid="stExpander"] details > summary svg { stroke: #FF5023 !important; }
 
-/* ── File uploader ── */
-[data-testid="stFileUploader"] {
+/* ── File uploader: solo el drop zone, no el botón ── */
+[data-testid="stFileUploaderDropzone"] {
     border: 1.5px dashed #5F5FC4 !important;
     border-radius: 6px !important;
     background-color: #FAFAFF !important;
 }
-[data-testid="stFileUploader"] * { color: #3B3B3B !important; }
 
-/* ── Formulario de login ── */
+/* ── Formulario ── */
 [data-testid="stForm"] {
     border: 1.5px solid #E1E1F5 !important;
     border-radius: 10px !important;
@@ -157,15 +124,10 @@ button[kind="primary"] {
 }
 
 /* ── Divisor ── */
-hr { border-color: #E1E1F5 !important; }
+hr { border-color: #E1E1F5 !important; opacity: 0.6; }
 
 /* ── Caption ── */
-.stCaption, small { color: #C6C6C6 !important; }
-
-/* ── Info / success / warning / error ── */
-[data-testid="stAlert"] * {
-    font-family: 'Barlow', sans-serif !important;
-}
+[data-testid="stCaptionContainer"] p { color: #C6C6C6 !important; }
 
 /* ── Tablas markdown ── */
 table { border-collapse: collapse; width: 100%; }
@@ -180,37 +142,50 @@ tr:nth-child(even) td { background-color: #FAFAFF !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Login ────────────────────────────────────────────────────────────────────
-def check_password():
-    """Muestra pantalla de login. Devuelve True si la sesión está autenticada."""
+# ─── Acceso por email corporativo ────────────────────────────────────────────
+def check_access():
+    """
+    Pantalla de acceso. Permite entrar a cualquier @fu.do
+    o a emails extra listados en st.secrets["allowed_emails"] (separados por coma).
+    """
     if st.session_state.get("authenticated"):
         return True
 
+    # Emails adicionales autorizados fuera del dominio @fu.do
+    extra_raw   = st.secrets.get("allowed_emails", "")
+    extra_emails = {e.strip().lower() for e in extra_raw.split(",") if e.strip()}
+
     st.markdown("""
-    <div style="max-width:400px; margin:80px auto 0; text-align:center;">
-        <div style="background:#FF5023; border-radius:10px; padding:28px 32px 20px; margin-bottom:24px;">
-            <span style="font-family:'Barlow',sans-serif; font-size:28px; font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
+    <div style="max-width:440px; margin:80px auto 0;">
+        <div style="background:#FF5023; border-radius:10px; padding:28px 32px 18px;
+                    margin-bottom:24px; text-align:center;">
+            <div style="font-family:'Barlow',sans-serif; font-size:26px;
+                        font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
                 🧾 Facturación Fudo
-            </span><br>
-            <span style="font-family:'Barlow',sans-serif; font-size:13px; color:#FFC9BB; font-weight:400;">
-                Anser Indicus SPA — acceso restringido
-            </span>
+            </div>
+            <div style="font-family:'Barlow',sans-serif; font-size:13px;
+                        color:#FFC9BB; margin-top:4px;">
+                Anser Indicus SPA — ingresá con tu correo corporativo
+            </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    with st.form("login_form"):
-        pwd = st.text_input("Contraseña", type="password", placeholder="••••••••")
-        ok  = st.form_submit_button("Ingresar →", use_container_width=True, type="primary")
-        if ok:
-            clave_correcta = st.secrets.get("password", "")
-            if pwd == clave_correcta:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Contraseña incorrecta")
-
-    st.markdown("</div>", unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 3, 1])
+    with col:
+        with st.form("access_form"):
+            email = st.text_input("Correo corporativo", placeholder="nombre@fu.do")
+            ok    = st.form_submit_button("Ingresar →", use_container_width=True, type="primary")
+            if ok:
+                email_lower = email.strip().lower()
+                if email_lower.endswith("@fu.do") or email_lower in extra_emails:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user_email"]    = email_lower
+                    st.rerun()
+                elif not email_lower:
+                    st.warning("Ingresá tu correo corporativo.")
+                else:
+                    st.error("❌ Solo se permite acceso con correos @fu.do")
     return False
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
@@ -1102,7 +1077,7 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
 
 # ─── UI Principal ─────────────────────────────────────────────────────────────
 def main():
-    if not check_password():
+    if not check_access():
         return
 
     rl = cargar_regiones()
@@ -1191,9 +1166,9 @@ def main():
         🔴 sin datos · 🟠 sin DB_ID
         🟡 verificar · 🟢 OK
         """)
-        if st.button("🔒 Cerrar sesión", use_container_width=True):
-            st.session_state["authenticated"] = False
-            st.rerun()
+        user_email = st.session_state.get("user_email", "")
+        if user_email:
+            st.caption(f"👤 {user_email}")
         st.caption("v1.0 · Facturación Terminales")
 
     hacer_terminales = "Terminales" in tipo_fact
