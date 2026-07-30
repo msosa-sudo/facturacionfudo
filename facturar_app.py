@@ -4,6 +4,7 @@ Facturación Terminales — Anser Indicus SPA
 Interfaz web Streamlit v1.0
 """
 import io, re, unicodedata
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -847,7 +848,7 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
     return output
 
 # ─── Generación Excel de Facturación ─────────────────────────────────────────
-def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_operador, alertas_formato):
+def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_operador, alertas_formato, comisiones_sin_cuenta=None):
     fecha_hoy = date.today().strftime('%d/%m/%Y')
     wb = Workbook()
 
@@ -913,9 +914,8 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
                 ws_com.cell(row=row_idx, column=2).fill = orange_fill
 
     # ── Hoja Comisiones sin cuenta ──
-    if 'comisiones_sin_cuenta' in st.session_state.get('resultado', {}):
-        csc = st.session_state['resultado']['comisiones_sin_cuenta']
-        if csc:
+    csc = comisiones_sin_cuenta or []
+    if csc:
             ws_ce = wb.create_sheet('⚠ Comisiones sin cuenta')
             aplicar_header(ws_ce,
                 ['External Reference','Slug extraído','Operation ID','Monto','Fecha','Acción'],
@@ -1098,14 +1098,19 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
 
     filas = []
 
+    def _clean_opid(v):
+        """Normaliza el operation_id para comparar con ids_facturados_real."""
+        return str(v).replace("'", "").strip()
+
     # ── Terminales ─────────────────────────────────────────────
     vistos = set()
     for row in res['rows']:
         opid = row['operation_id']
-        if opid in vistos:
+        opid_c = _clean_opid(opid)
+        if opid_c in vistos:
             continue
-        vistos.add(opid)
-        if opid in ids_facturados_real:
+        vistos.add(opid_c)
+        if opid_c in ids_facturados_real:
             estado = 'FACTURADO'
         elif row['sin_datos']:
             estado = 'SIN DATOS'
@@ -1113,7 +1118,7 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
             estado = 'FALTANTE'
         nombre = row['nombre_billing'] or row['nombre_cuenta']
         filas.append({
-            'operation_id': opid,
+            'operation_id': opid_c,
             'fecha':        row['fecha_compra'],
             'tipo':         'Terminal',
             'cuenta':       nombre,
@@ -1125,7 +1130,7 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
 
     # ── Deuda fija ─────────────────────────────────────────────
     for row in res['rows_comision']:
-        opid = row['operation_id']
+        opid = _clean_opid(row['operation_id'])
         if opid in ids_facturados_real:
             estado = 'FACTURADO'
         elif row['sin_datos']:
@@ -1145,7 +1150,15 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
         })
 
     # ── Sin cuenta (deuda fija sin match en accounts.csv) ──────
+    # Aun así puede estar facturada si el operation_id aparece en el asiento
     for row in res['comisiones_sin_cuenta']:
+        opid_sc = str(row['operation_id']).replace("'", "").strip()
+        if opid_sc in ids_facturados_real:
+            estado_sc = 'FACTURADO'
+            detalle_sc = f"Facturado (slug con typo en accounts.csv: {row['slug']})"
+        else:
+            estado_sc  = 'SIN CUENTA'
+            detalle_sc = f"Slug no encontrado en accounts.csv: {row['slug']}"
         filas.append({
             'operation_id': row['operation_id'],
             'fecha':        row['fecha'],
@@ -1153,8 +1166,8 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
             'cuenta':       row['extref'],
             'id_cuenta':    '',
             'monto':        row['monto'],
-            'estado':       'SIN CUENTA',
-            'detalle':      f"Slug no encontrado en accounts.csv: {row['slug']}",
+            'estado':       estado_sc,
+            'detalle':      detalle_sc,
         })
 
     # ── Comerciales ────────────────────────────────────────────
@@ -1245,7 +1258,7 @@ def generar_excel_auditoria(filas, periodo=''):
         value=f"Generado: {hoy}" + (f"  |  Período: {periodo}" if periodo else '')
     ).font = Font(italic=True, name='Arial', size=10, color='666666')
 
-    from collections import Counter
+
     conteo = Counter(f['estado'] for f in filas)
     total  = len({f['operation_id'] for f in filas})
 
@@ -1580,7 +1593,8 @@ def main():
                 excel_fact = generar_excel_facturacion(
                     df_work if not df_work.empty else pd.DataFrame(columns=empty_cols),
                     rows_comision if hacer_comisiones else [],
-                    alertas_monto, alertas_op, alertas_fmt
+                    alertas_monto, alertas_op, alertas_fmt,
+                    comisiones_sin_cuenta=csc,
                 )
             nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
             with dl_col2:
@@ -1678,7 +1692,7 @@ def main():
                 st.stop()
 
             # ── Métricas resumen ────────────────────────────────────
-            from collections import Counter
+        
             conteo_a = Counter(f['estado'] for f in filas_aud)
             total_a  = len({f['operation_id'] for f in filas_aud})
             n_fact   = conteo_a.get('FACTURADO', 0)
