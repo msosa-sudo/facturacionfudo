@@ -1085,110 +1085,88 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
     return output
 
 # ─── Auditoría ────────────────────────────────────────────────────────────────
-def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
-                  rl, slug_to_accid, slug_to_nombre):
+def run_auditoria(df_c, cols, ids_facturados_real):
     """
-    Corre procesar() sin filtro de facturados para obtener el universo completo,
-    luego cruza con el asiento real para clasificar cada operación.
+    Auditoría simplificada: solo cruza operation_id del collection
+    contra la referencia de pago del asiento contable.
+    No necesita billing data ni contactos Odoo.
     """
-    # Universo completo (sin filtrar por ids_facturados)
-    res = procesar(df_c, cols, billing_raw, refs, set(), rl,
-                   slug_to_accid, slug_to_nombre,
-                   hacer_terminales=True, hacer_comisiones=True)
+    col_desc   = cols['desc']
+    col_opid   = cols['opid']
+    col_monto  = cols['monto']
+    col_fecha  = cols['fecha']
+    col_op     = cols['op']
+    col_extref = cols['extref']
+    tiene_extref = col_extref in df_c.columns
 
-    filas = []
+    mask_reason   = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:'))
+    mask_extref   = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:'))
+                     if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
+    mask_op       = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
+                     else pd.Series([False]*len(df_c), index=df_c.index))
+    mask_comision = df_c[col_desc].astype(str).str.contains('Deuda por comisiones', na=False)
+    df_rel = df_c[mask_reason | mask_extref | mask_op | mask_comision].copy()
 
-    # ── Terminales ─────────────────────────────────────────────
+    filas  = []
     vistos = set()
-    for row in res['rows']:
-        opid = row['operation_id']
+
+    for _, row in df_rel.iterrows():
+        desc_val = str(row[col_desc]).strip().strip('"')
+        opid     = row[col_opid]
+        monto    = row[col_monto]
+        fecha    = str(row.get(col_fecha, '')).strip().split(' ')[0]
+        if fecha == 'nan': fecha = ''
+        operador = str(row.get(col_op, '')) if col_op in df_c.columns else ''
+        extref   = str(row.get(col_extref, '') or '').strip() if tiene_extref else ''
+
         if opid in vistos:
             continue
         vistos.add(opid)
-        if opid in ids_facturados_real:
-            estado = 'FACTURADO'
-        elif row['sin_datos']:
-            estado = 'SIN DATOS'
+
+        # ── Comerciales ──────────────────────────────────────
+        if es_comercial(operador) and not desc_val.startswith(('Terminal:', 'TFP:')):
+            filas.append({
+                'operation_id': opid, 'fecha': fecha, 'tipo': 'Terminal',
+                'cuenta': operador.strip(), 'id_cuenta': '',
+                'monto': monto, 'estado': 'COMERCIAL', 'detalle': desc_val[:60],
+            })
+            continue
+
+        # ── Deuda fija ────────────────────────────────────────
+        if 'Deuda por comisiones' in desc_val:
+            slug = extref.split('@', 1)[1].lower() if '@' in extref else extref
+            estado = 'FACTURADO' if opid in ids_facturados_real else 'FALTANTE'
+            filas.append({
+                'operation_id': opid, 'fecha': fecha, 'tipo': 'Deuda fija',
+                'cuenta': slug or extref, 'id_cuenta': '',
+                'monto': monto, 'estado': estado, 'detalle': '',
+            })
+            continue
+
+        # ── Terminales ────────────────────────────────────────
+        ref_str = get_ref_string(row, col_desc, col_extref, tiene_extref)
+        if ref_str is None:
+            filas.append({
+                'operation_id': opid, 'fecha': fecha, 'tipo': '?',
+                'cuenta': desc_val[:60], 'id_cuenta': '',
+                'monto': monto, 'estado': 'FORMATO INVÁLIDO', 'detalle': extref,
+            })
+            continue
+
+        if ref_str.startswith('Terminal:'):
+            id_c, nombre, lineas = parse_terminal(ref_str)
+        elif ref_str.startswith('TFP:'):
+            id_c, nombre, lineas = parse_tfp(ref_str)
+            if not lineas:
+                continue
         else:
-            estado = 'FALTANTE'
-        nombre = row['nombre_billing'] or row['nombre_cuenta']
-        filas.append({
-            'operation_id': opid,
-            'fecha':        row['fecha_compra'],
-            'tipo':         'Terminal',
-            'cuenta':       nombre,
-            'id_cuenta':    row['id_cuenta'],
-            'monto':        row['monto'],
-            'estado':       estado,
-            'detalle':      '' if estado != 'SIN DATOS' else 'Sin RUT en billing data',
-        })
+            continue
 
-    # ── Deuda fija ─────────────────────────────────────────────
-    for row in res['rows_comision']:
-        opid = row['operation_id']
-        if opid in ids_facturados_real:
-            estado = 'FACTURADO'
-        elif row['sin_datos']:
-            estado = 'SIN DATOS'
-        else:
-            estado = 'FALTANTE'
-        nombre = row['nombre_billing'] or row['nombre_cuenta']
+        estado = 'FACTURADO' if opid in ids_facturados_real else 'FALTANTE'
         filas.append({
-            'operation_id': opid,
-            'fecha':        row['fecha_compra'],
-            'tipo':         'Deuda fija',
-            'cuenta':       nombre,
-            'id_cuenta':    row['id_cuenta'],
-            'monto':        row['monto_real'],
-            'estado':       estado,
-            'detalle':      '' if estado != 'SIN DATOS' else 'Sin RUT en billing data',
-        })
-
-    # ── Sin cuenta (deuda fija sin match en accounts.csv) ──────
-    # Aun así puede estar facturada si el operation_id aparece en el asiento
-    for row in res['comisiones_sin_cuenta']:
-        opid_sc = str(row['operation_id']).replace("'", "").strip()
-        if opid_sc in ids_facturados_real:
-            estado_sc = 'FACTURADO'
-            detalle_sc = f"Facturado (slug con typo en accounts.csv: {row['slug']})"
-        else:
-            estado_sc  = 'SIN CUENTA'
-            detalle_sc = f"Slug no encontrado en accounts.csv: {row['slug']}"
-        filas.append({
-            'operation_id': row['operation_id'],
-            'fecha':        row['fecha'],
-            'tipo':         'Deuda fija',
-            'cuenta':       row['extref'],
-            'id_cuenta':    '',
-            'monto':        row['monto'],
-            'estado':       estado_sc,
-            'detalle':      detalle_sc,
-        })
-
-    # ── Comerciales ────────────────────────────────────────────
-    for row in res['alertas_operador']:
-        filas.append({
-            'operation_id': row['operation_id'],
-            'fecha':        row['fecha'],
-            'tipo':         'Terminal',
-            'cuenta':       row['operador'],
-            'id_cuenta':    '',
-            'monto':        row['monto'],
-            'estado':       'COMERCIAL',
-            'detalle':      row['descripcion'],
-        })
-
-    # ── Formato desconocido ────────────────────────────────────
-    for row in res['alertas_formato']:
-        filas.append({
-            'operation_id': row['operation_id'],
-            'fecha':        row['fecha'],
-            'tipo':         '?',
-            'cuenta':       row['descripcion'][:60],
-            'id_cuenta':    '',
-            'monto':        row['monto'],
-            'estado':       'FORMATO INVÁLIDO',
-            'detalle':      row.get('extref', ''),
+            'operation_id': opid, 'fecha': fecha, 'tipo': 'Terminal',
+            'cuenta': nombre, 'id_cuenta': id_c,
+            'monto': monto, 'estado': estado, 'detalle': '',
         })
 
     return filas
@@ -1622,18 +1600,17 @@ def main():
 
         with st.expander("ℹ️ ¿Cómo funciona la auditoría?"):
             st.markdown("""
-            La herramienta analiza el collection del período y lo cruza con el asiento contable de Odoo para clasificar cada operación:
+            La herramienta cruza el collection del período con el asiento contable de Odoo usando la referencia de pago de MP.
+            No necesitás subir billing data ni contactos.
 
             | Estado | Significado |
             |---|---|
             | ✓ **FACTURADO** | El pago aparece en el asiento contable — OK |
             | ✗ **FALTANTE** | El pago debería facturarse pero no está en Odoo |
-            | ⚠ **SIN DATOS** | Sin RUT en billing data — no se puede facturar hasta que el ejecutivo lo complete |
-            | ⚠ **SIN CUENTA** | Deuda fija sin match en accounts.csv |
             | ℹ **COMERCIAL** | Pago de comercial — no se factura |
             | ? **FORMATO INVÁLIDO** | No se pudo interpretar la descripción del pago |
 
-            **Qué necesitás:** el collection del período completo + billing data + asiento contable de Odoo.
+            **Qué necesitás:** el collection del período completo + asiento contable de Odoo.
             El asiento contable debería incluir **todos los asientos del período** para que la comparación sea exacta.
             """)
 
@@ -1644,47 +1621,29 @@ def main():
         with col_a1:
             fa_col = st.file_uploader("Collection Mercado Pago *(requerido)*",
                                       type=['xlsx','csv'], key="aud_col")
-            fa_bil = st.file_uploader("Billing data *(requerido)*",
-                                      type=['csv','xlsx'], key="aud_bil")
         with col_a2:
-            fa_con = st.file_uploader("Contactos Odoo — res.partner *(requerido)*",
-                                      type=['xlsx'], key="aud_con")
             fa_odo = st.file_uploader("Asiento contable Odoo *(requerido)*",
                                       type=['xlsx'], key="aud_odo")
 
-        fa_acc = st.file_uploader(
-            "Accounts CSV *(opcional — para auditar Deuda fija)*",
-            type=['csv'], key="aud_acc")
-
         st.divider()
-        aud_ok = all([fa_col, fa_bil, fa_con, fa_odo])
+        aud_ok = all([fa_col, fa_odo])
         if not aud_ok:
-            falt_a = [n for f, n in [(fa_col,"Collection"),(fa_bil,"Billing data"),
-                                     (fa_con,"Contactos Odoo"),(fa_odo,"Asiento contable")] if not f]
+            falt_a = [n for f, n in [(fa_col,"Collection"),(fa_odo,"Asiento contable")] if not f]
             st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(falt_a)}**")
 
         if st.button("🔍  Analizar", type="primary", use_container_width=True, disabled=not aud_ok):
             with st.spinner("Leyendo archivos..."):
                 try:    df_ac, acols = leer_collection(fa_col)
                 except Exception as e: st.error(f"❌ Collection: {e}"); st.stop()
-                try:    abil = leer_billing(fa_bil)
-                except Exception as e: st.error(f"❌ Billing data: {e}"); st.stop()
-                try:    arefs = leer_contactos(fa_con)
-                except Exception as e: st.error(f"❌ Contactos Odoo: {e}"); st.stop()
                 try:    aids_real = leer_odoo(fa_odo)
                 except Exception as e: st.error(f"❌ Asiento contable: {e}"); st.stop()
                 if len(aids_real) < 5:
                     st.warning(f"⚠️ El asiento contable tiene solo **{len(aids_real)} entrada(s)**. "
                                f"Para una auditoría completa necesitás exportar el asiento con "
                                f"**todas las facturas del período**, no solo una.")
-                try:    aslug_id, aslug_nom = leer_accounts(fa_acc) if fa_acc else ({}, {})
-                except Exception as e:
-                    st.warning(f"⚠️ Accounts CSV: {e} — auditoría de Deuda fija incompleta")
-                    aslug_id, aslug_nom = {}, {}
 
             with st.spinner("Analizando operaciones..."):
-                filas_aud = run_auditoria(df_ac, acols, abil, arefs, aids_real,
-                                          rl, aslug_id, aslug_nom)
+                filas_aud = run_auditoria(df_ac, acols, aids_real)
 
             if not filas_aud:
                 st.warning("No se encontraron operaciones para auditar en este collection.")
@@ -1696,43 +1655,32 @@ def main():
             total_a  = len({f['operation_id'] for f in filas_aud})
             n_fact   = conteo_a.get('FACTURADO', 0)
             n_falt   = conteo_a.get('FALTANTE', 0)
-            n_sdat   = conteo_a.get('SIN DATOS', 0) + conteo_a.get('SIN CUENTA', 0)
             n_otros  = conteo_a.get('COMERCIAL', 0) + conteo_a.get('FORMATO INVÁLIDO', 0)
 
             st.divider()
             st.subheader("📊 Resultado de la auditoría")
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3 = st.columns(3)
             m1.metric("Total verificadas", total_a)
             m2.metric("✓ Facturadas", n_fact,
                       f"{round(n_fact/total_a*100) if total_a else 0}%")
             m3.metric("✗ Faltantes", n_falt,
                       "← revisar" if n_falt else "ninguna")
-            m4.metric("⚠ Inconsistencias", n_sdat)
 
             # ── Alertas ─────────────────────────────────────────────
-            if n_falt == 0 and n_sdat == 0:
+            if n_falt == 0:
                 msg_ok = "✅ Todo el período está correctamente facturado. No hay operaciones pendientes."
                 if n_otros:
                     msg_ok += f" Además, hay {n_otros} pago(s) que no corresponden a terminales ni deuda fija — ver detalle abajo."
                 st.success(msg_ok)
             else:
-                if n_falt:
-                    falt_list = [f for f in filas_aud if f['estado'] == 'FALTANTE']
-                    with st.expander(f"✗ **{n_falt} operación(es) FALTANTE(S) — sin facturar**", expanded=True):
-                        for f in falt_list:
-                            st.markdown(
-                                f"- **{f['cuenta']}** (ID: {f['id_cuenta']}) — "
-                                f"{f['tipo']} — {f['fecha']} — "
-                                f"**${f['monto']:,.0f}**  `{f['operation_id']}`"
-                            )
-                if n_sdat:
-                    sdat_list = [f for f in filas_aud if f['estado'] in ('SIN DATOS','SIN CUENTA')]
-                    with st.expander(f"⚠ **{n_sdat} operación(es) sin datos — no se pueden facturar**"):
-                        for f in sdat_list:
-                            st.markdown(
-                                f"- **{f['cuenta']}** — {f['tipo']} — {f['fecha']} — "
-                                f"${f['monto']:,.0f} — _{f['detalle']}_"
-                            )
+                falt_list = [f for f in filas_aud if f['estado'] == 'FALTANTE']
+                with st.expander(f"✗ **{n_falt} operación(es) FALTANTE(S) — sin facturar**", expanded=True):
+                    for f in falt_list:
+                        st.markdown(
+                            f"- **{f['cuenta']}** — "
+                            f"{f['tipo']} — {f['fecha']} — "
+                            f"**${float(f['monto']):,.0f}**  `{f['operation_id']}`"
+                        )
 
             # Comerciales y formato inválido — siempre mostrar si hay
             if n_otros:
