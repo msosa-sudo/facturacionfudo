@@ -1098,19 +1098,14 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
 
     filas = []
 
-    def _clean_opid(v):
-        """Normaliza el operation_id para comparar con ids_facturados_real."""
-        return str(v).replace("'", "").strip()
-
     # ── Terminales ─────────────────────────────────────────────
     vistos = set()
     for row in res['rows']:
         opid = row['operation_id']
-        opid_c = _clean_opid(opid)
-        if opid_c in vistos:
+        if opid in vistos:
             continue
-        vistos.add(opid_c)
-        if opid_c in ids_facturados_real:
+        vistos.add(opid)
+        if opid in ids_facturados_real:
             estado = 'FACTURADO'
         elif row['sin_datos']:
             estado = 'SIN DATOS'
@@ -1118,7 +1113,7 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
             estado = 'FALTANTE'
         nombre = row['nombre_billing'] or row['nombre_cuenta']
         filas.append({
-            'operation_id': opid_c,
+            'operation_id': opid,
             'fecha':        row['fecha_compra'],
             'tipo':         'Terminal',
             'cuenta':       nombre,
@@ -1130,7 +1125,7 @@ def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
 
     # ── Deuda fija ─────────────────────────────────────────────
     for row in res['rows_comision']:
-        opid = _clean_opid(row['operation_id'])
+        opid = row['operation_id']
         if opid in ids_facturados_real:
             estado = 'FACTURADO'
         elif row['sin_datos']:
@@ -1678,6 +1673,10 @@ def main():
                 except Exception as e: st.error(f"❌ Contactos Odoo: {e}"); st.stop()
                 try:    aids_real = leer_odoo(fa_odo)
                 except Exception as e: st.error(f"❌ Asiento contable: {e}"); st.stop()
+                if len(aids_real) < 5:
+                    st.warning(f"⚠️ El asiento contable tiene solo **{len(aids_real)} entrada(s)**. "
+                               f"Para una auditoría completa necesitás exportar el asiento con "
+                               f"**todas las facturas del período**, no solo una.")
                 try:    aslug_id, aslug_nom = leer_accounts(fa_acc) if fa_acc else ({}, {})
                 except Exception as e:
                     st.warning(f"⚠️ Accounts CSV: {e} — auditoría de Deuda fija incompleta")
@@ -1712,7 +1711,10 @@ def main():
 
             # ── Alertas ─────────────────────────────────────────────
             if n_falt == 0 and n_sdat == 0:
-                st.success("✅ Todo el período está correctamente facturado. No hay operaciones pendientes.")
+                msg_ok = "✅ Todo el período está correctamente facturado. No hay operaciones pendientes."
+                if n_otros:
+                    msg_ok += f" Además, hay {n_otros} pago(s) que no corresponden a terminales ni deuda fija — ver detalle abajo."
+                st.success(msg_ok)
             else:
                 if n_falt:
                     falt_list = [f for f in filas_aud if f['estado'] == 'FALTANTE']
@@ -1731,8 +1733,18 @@ def main():
                                 f"- **{f['cuenta']}** — {f['tipo']} — {f['fecha']} — "
                                 f"${f['monto']:,.0f} — _{f['detalle']}_"
                             )
-                if n_otros:
-                    st.info(f"ℹ️ {n_otros} operación(es) no facturable(s) (comerciales o formato inválido) — ver Excel.")
+
+            # Comerciales y formato inválido — siempre mostrar si hay
+            if n_otros:
+                otros_list = [f for f in filas_aud if f['estado'] in ('COMERCIAL', 'FORMATO INVÁLIDO')]
+                with st.expander(f"ℹ️ **{n_otros} pago(s) excluido(s) de la facturación**"):
+                    for f in otros_list:
+                        etiqueta = "Comercial" if f['estado'] == 'COMERCIAL' else "Formato inválido"
+                        st.markdown(
+                            f"- **{etiqueta}** — {f['cuenta']} — {f['fecha']} — "
+                            f"${float(f['monto']):,.0f}  `{f['operation_id']}`"
+                            + (f" — _{f['detalle']}_" if f['detalle'] else "")
+                        )
 
             # ── Descarga ────────────────────────────────────────────
             st.divider()
