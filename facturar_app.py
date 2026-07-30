@@ -1084,6 +1084,200 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
     wb.save(output); output.seek(0)
     return output
 
+# ─── Auditoría ────────────────────────────────────────────────────────────────
+def run_auditoria(df_c, cols, billing_raw, refs, ids_facturados_real,
+                  rl, slug_to_accid, slug_to_nombre):
+    """
+    Corre procesar() sin filtro de facturados para obtener el universo completo,
+    luego cruza con el asiento real para clasificar cada operación.
+    """
+    # Universo completo (sin filtrar por ids_facturados)
+    res = procesar(df_c, cols, billing_raw, refs, set(), rl,
+                   slug_to_accid, slug_to_nombre,
+                   hacer_terminales=True, hacer_comisiones=True)
+
+    filas = []
+
+    # ── Terminales ─────────────────────────────────────────────
+    vistos = set()
+    for row in res['rows']:
+        opid = row['operation_id']
+        if opid in vistos:
+            continue
+        vistos.add(opid)
+        if opid in ids_facturados_real:
+            estado = 'FACTURADO'
+        elif row['sin_datos']:
+            estado = 'SIN DATOS'
+        else:
+            estado = 'FALTANTE'
+        nombre = row['nombre_billing'] or row['nombre_cuenta']
+        filas.append({
+            'operation_id': opid,
+            'fecha':        row['fecha_compra'],
+            'tipo':         'Terminal',
+            'cuenta':       nombre,
+            'id_cuenta':    row['id_cuenta'],
+            'monto':        row['monto'],
+            'estado':       estado,
+            'detalle':      '' if estado != 'SIN DATOS' else 'Sin RUT en billing data',
+        })
+
+    # ── Deuda fija ─────────────────────────────────────────────
+    for row in res['rows_comision']:
+        opid = row['operation_id']
+        if opid in ids_facturados_real:
+            estado = 'FACTURADO'
+        elif row['sin_datos']:
+            estado = 'SIN DATOS'
+        else:
+            estado = 'FALTANTE'
+        nombre = row['nombre_billing'] or row['nombre_cuenta']
+        filas.append({
+            'operation_id': opid,
+            'fecha':        row['fecha_compra'],
+            'tipo':         'Deuda fija',
+            'cuenta':       nombre,
+            'id_cuenta':    row['id_cuenta'],
+            'monto':        row['monto_real'],
+            'estado':       estado,
+            'detalle':      '' if estado != 'SIN DATOS' else 'Sin RUT en billing data',
+        })
+
+    # ── Sin cuenta (deuda fija sin match en accounts.csv) ──────
+    for row in res['comisiones_sin_cuenta']:
+        filas.append({
+            'operation_id': row['operation_id'],
+            'fecha':        row['fecha'],
+            'tipo':         'Deuda fija',
+            'cuenta':       row['extref'],
+            'id_cuenta':    '',
+            'monto':        row['monto'],
+            'estado':       'SIN CUENTA',
+            'detalle':      f"Slug no encontrado en accounts.csv: {row['slug']}",
+        })
+
+    # ── Comerciales ────────────────────────────────────────────
+    for row in res['alertas_operador']:
+        filas.append({
+            'operation_id': row['operation_id'],
+            'fecha':        row['fecha'],
+            'tipo':         'Terminal',
+            'cuenta':       row['operador'],
+            'id_cuenta':    '',
+            'monto':        row['monto'],
+            'estado':       'COMERCIAL',
+            'detalle':      row['descripcion'],
+        })
+
+    # ── Formato desconocido ────────────────────────────────────
+    for row in res['alertas_formato']:
+        filas.append({
+            'operation_id': row['operation_id'],
+            'fecha':        row['fecha'],
+            'tipo':         '?',
+            'cuenta':       row['descripcion'][:60],
+            'id_cuenta':    '',
+            'monto':        row['monto'],
+            'estado':       'FORMATO INVÁLIDO',
+            'detalle':      row.get('extref', ''),
+        })
+
+    return filas
+
+
+def generar_excel_auditoria(filas, periodo=''):
+    wb  = Workbook()
+    hoy = date.today().strftime('%d/%m/%Y')
+
+    estado_fill = {
+        'FACTURADO':       PatternFill('solid', start_color='C6EFCE'),
+        'FALTANTE':        PatternFill('solid', start_color='FFD7D7'),
+        'SIN DATOS':       PatternFill('solid', start_color='FFEB9C'),
+        'SIN CUENTA':      PatternFill('solid', start_color='FFEB9C'),
+        'COMERCIAL':       PatternFill('solid', start_color='DDEEFF'),
+        'FORMATO INVÁLIDO':PatternFill('solid', start_color='F2F2F2'),
+    }
+
+    # ── Hoja principal: detalle completo ───────────────────────
+    ws = wb.active
+    ws.title = 'Auditoría completa'
+    headers = ['Estado','Fecha','Tipo','Cuenta','ID Cuenta','Operation ID','Monto','Detalle']
+    widths  = [18, 14, 12, 42, 14, 22, 14, 50]
+    aplicar_header(ws, headers, widths)
+
+    for r, f in enumerate(filas, 2):
+        vals = [f['estado'], f['fecha'], f['tipo'], f['cuenta'],
+                f['id_cuenta'], f"'{f['operation_id']}", f['monto'], f['detalle']]
+        fill = estado_fill.get(f['estado'], PatternFill())
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name='Arial', size=10)
+            cell.fill = fill
+            if c == 7: cell.number_format = '$#,##0'
+
+    # ── Hoja faltantes ─────────────────────────────────────────
+    faltantes = [f for f in filas if f['estado'] == 'FALTANTE']
+    if faltantes:
+        ws_f = wb.create_sheet('⚠ Faltantes')
+        aplicar_header(ws_f, ['Fecha','Tipo','Cuenta','ID Cuenta','Operation ID','Monto'], [14,12,42,14,22,14])
+        for r, f in enumerate(faltantes, 2):
+            vals = [f['fecha'], f['tipo'], f['cuenta'], f['id_cuenta'],
+                    f"'{f['operation_id']}", f['monto']]
+            for c, v in enumerate(vals, 1):
+                cell = ws_f.cell(row=r, column=c, value=v)
+                cell.font = Font(name='Arial', size=10)
+                cell.fill = PatternFill('solid', start_color='FFD7D7')
+                if c == 6: cell.number_format = '$#,##0'
+
+    # ── Hoja resumen ───────────────────────────────────────────
+    ws_r = wb.create_sheet('Resumen auditoría')
+    ws_r.column_dimensions['A'].width = 35
+    ws_r.column_dimensions['B'].width = 16
+    ws_r.column_dimensions['C'].width = 20
+
+    t = ws_r.cell(row=1, column=1, value='AUDITORÍA DE FACTURACIÓN')
+    t.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
+    t.fill = header_fill; t.alignment = Alignment(horizontal='center', vertical='center')
+    ws_r.merge_cells('A1:C1'); ws_r.row_dimensions[1].height = 24
+
+    ws_r.cell(row=2, column=1,
+        value=f"Generado: {hoy}" + (f"  |  Período: {periodo}" if periodo else '')
+    ).font = Font(italic=True, name='Arial', size=10, color='666666')
+
+    from collections import Counter
+    conteo = Counter(f['estado'] for f in filas)
+    total  = len({f['operation_id'] for f in filas})
+
+    def fila_r(r, label, valor, color, nota=''):
+        c1 = ws_r.cell(row=r, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=11)
+        c1.fill = PatternFill('solid', start_color=color)
+        c1.alignment = Alignment(horizontal='right', vertical='center')
+        c1.border = Border(outline=Side(style='thin'))
+        c2 = ws_r.cell(row=r, column=2, value=valor)
+        c2.font = Font(bold=True, name='Arial', size=12, color='1F4E79')
+        c2.fill = PatternFill('solid', start_color=color)
+        c2.alignment = Alignment(horizontal='center', vertical='center')
+        c2.border = Border(outline=Side(style='thin'))
+        if nota:
+            ws_r.cell(row=r, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+
+    fila_r(4,  'Total operaciones verificadas', total,                        'D9E1F2')
+    fila_r(6,  '✓  Correctamente facturadas',   conteo.get('FACTURADO', 0),   'C6EFCE',
+           f'{round(conteo.get("FACTURADO",0)/total*100) if total else 0}% del total')
+    fila_r(7,  '✗  Faltantes por facturar',      conteo.get('FALTANTE', 0),    'FFD7D7',
+           '← Revisar urgente' if conteo.get('FALTANTE', 0) else '')
+    fila_r(8,  '⚠  Sin datos de facturación',    conteo.get('SIN DATOS', 0) + conteo.get('SIN CUENTA', 0), 'FFEB9C',
+           'Pedir RUT/cuenta al ejecutivo' if conteo.get('SIN DATOS',0)+conteo.get('SIN CUENTA',0) else '')
+    fila_r(9,  'ℹ  Comerciales (no facturable)', conteo.get('COMERCIAL', 0),  'DDEEFF')
+    fila_r(10, '?  Formato no reconocido',        conteo.get('FORMATO INVÁLIDO', 0), 'F2F2F2')
+
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    return output
+
+
 # ─── UI Principal ─────────────────────────────────────────────────────────────
 def main():
     if not check_access():
@@ -1156,6 +1350,7 @@ def main():
         paso = st.radio("", [
             "📋  PASO 1 — Crear contactos",
             "🧾  PASO 2 — Facturar",
+            "🔍  PASO 3 — Auditoría",
         ], label_visibility="collapsed")
 
         es_paso1 = "PASO 1" in paso
@@ -1400,6 +1595,144 @@ def main():
                 )
 
         st.success("✅ Procesamiento completado")
+
+    # ══════════════════════════════════════════════════════════
+    # PASO 3 — Auditoría de integridad
+    # ══════════════════════════════════════════════════════════
+    if "PASO 3" in paso:
+        st.markdown("""
+        <div style="background:#3938A0; border-radius:10px; padding:18px 24px 14px; margin-bottom:12px;">
+            <div style="font-family:'Barlow',sans-serif; font-size:20px; font-weight:700; color:#FFFFFF;">
+                🔍 Auditoría de facturación
+            </div>
+            <div style="font-family:'Barlow',sans-serif; font-size:13px; color:#E1E1F5; margin-top:4px;">
+                Verificá que todas las operaciones del período estén correctamente facturadas
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("ℹ️ ¿Cómo funciona la auditoría?"):
+            st.markdown("""
+            La herramienta analiza el collection del período y lo cruza con el asiento contable de Odoo para clasificar cada operación:
+
+            | Estado | Significado |
+            |---|---|
+            | ✓ **FACTURADO** | El pago aparece en el asiento contable — OK |
+            | ✗ **FALTANTE** | El pago debería facturarse pero no está en Odoo |
+            | ⚠ **SIN DATOS** | Sin RUT en billing data — no se puede facturar hasta que el ejecutivo lo complete |
+            | ⚠ **SIN CUENTA** | Deuda fija sin match en accounts.csv |
+            | ℹ **COMERCIAL** | Pago de comercial — no se factura |
+            | ? **FORMATO INVÁLIDO** | No se pudo interpretar la descripción del pago |
+
+            **Qué necesitás:** el collection del período completo + billing data + asiento contable de Odoo.
+            El asiento contable debería incluir **todos los asientos del período** para que la comparación sea exacta.
+            """)
+
+        st.subheader("📁 Archivos para la auditoría")
+        periodo_txt = st.text_input("Período a auditar (opcional)", placeholder="Ej: Julio 2026")
+
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            fa_col = st.file_uploader("Collection Mercado Pago *(requerido)*",
+                                      type=['xlsx','csv'], key="aud_col")
+            fa_bil = st.file_uploader("Billing data *(requerido)*",
+                                      type=['csv','xlsx'], key="aud_bil")
+        with col_a2:
+            fa_con = st.file_uploader("Contactos Odoo — res.partner *(requerido)*",
+                                      type=['xlsx'], key="aud_con")
+            fa_odo = st.file_uploader("Asiento contable Odoo *(requerido)*",
+                                      type=['xlsx'], key="aud_odo")
+
+        fa_acc = st.file_uploader(
+            "Accounts CSV *(opcional — para auditar Deuda fija)*",
+            type=['csv'], key="aud_acc")
+
+        st.divider()
+        aud_ok = all([fa_col, fa_bil, fa_con, fa_odo])
+        if not aud_ok:
+            falt_a = [n for f, n in [(fa_col,"Collection"),(fa_bil,"Billing data"),
+                                     (fa_con,"Contactos Odoo"),(fa_odo,"Asiento contable")] if not f]
+            st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(falt_a)}**")
+
+        if st.button("🔍  Analizar", type="primary", use_container_width=True, disabled=not aud_ok):
+            with st.spinner("Leyendo archivos..."):
+                try:    df_ac, acols = leer_collection(fa_col)
+                except Exception as e: st.error(f"❌ Collection: {e}"); st.stop()
+                try:    abil = leer_billing(fa_bil)
+                except Exception as e: st.error(f"❌ Billing data: {e}"); st.stop()
+                try:    arefs = leer_contactos(fa_con)
+                except Exception as e: st.error(f"❌ Contactos Odoo: {e}"); st.stop()
+                try:    aids_real = leer_odoo(fa_odo)
+                except Exception as e: st.error(f"❌ Asiento contable: {e}"); st.stop()
+                try:    aslug_id, aslug_nom = leer_accounts(fa_acc) if fa_acc else ({}, {})
+                except Exception as e:
+                    st.warning(f"⚠️ Accounts CSV: {e} — auditoría de Deuda fija incompleta")
+                    aslug_id, aslug_nom = {}, {}
+
+            with st.spinner("Analizando operaciones..."):
+                filas_aud = run_auditoria(df_ac, acols, abil, arefs, aids_real,
+                                          rl, aslug_id, aslug_nom)
+
+            if not filas_aud:
+                st.warning("No se encontraron operaciones para auditar en este collection.")
+                st.stop()
+
+            # ── Métricas resumen ────────────────────────────────────
+            from collections import Counter
+            conteo_a = Counter(f['estado'] for f in filas_aud)
+            total_a  = len({f['operation_id'] for f in filas_aud})
+            n_fact   = conteo_a.get('FACTURADO', 0)
+            n_falt   = conteo_a.get('FALTANTE', 0)
+            n_sdat   = conteo_a.get('SIN DATOS', 0) + conteo_a.get('SIN CUENTA', 0)
+            n_otros  = conteo_a.get('COMERCIAL', 0) + conteo_a.get('FORMATO INVÁLIDO', 0)
+
+            st.divider()
+            st.subheader("📊 Resultado de la auditoría")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total verificadas", total_a)
+            m2.metric("✓ Facturadas", n_fact,
+                      f"{round(n_fact/total_a*100) if total_a else 0}%")
+            m3.metric("✗ Faltantes", n_falt,
+                      "← revisar" if n_falt else "ninguna")
+            m4.metric("⚠ Inconsistencias", n_sdat)
+
+            # ── Alertas ─────────────────────────────────────────────
+            if n_falt == 0 and n_sdat == 0:
+                st.success("✅ Todo el período está correctamente facturado. No hay operaciones pendientes.")
+            else:
+                if n_falt:
+                    falt_list = [f for f in filas_aud if f['estado'] == 'FALTANTE']
+                    with st.expander(f"✗ **{n_falt} operación(es) FALTANTE(S) — sin facturar**", expanded=True):
+                        for f in falt_list:
+                            st.markdown(
+                                f"- **{f['cuenta']}** (ID: {f['id_cuenta']}) — "
+                                f"{f['tipo']} — {f['fecha']} — "
+                                f"**${f['monto']:,.0f}**  `{f['operation_id']}`"
+                            )
+                if n_sdat:
+                    sdat_list = [f for f in filas_aud if f['estado'] in ('SIN DATOS','SIN CUENTA')]
+                    with st.expander(f"⚠ **{n_sdat} operación(es) sin datos — no se pueden facturar**"):
+                        for f in sdat_list:
+                            st.markdown(
+                                f"- **{f['cuenta']}** — {f['tipo']} — {f['fecha']} — "
+                                f"${f['monto']:,.0f} — _{f['detalle']}_"
+                            )
+                if n_otros:
+                    st.info(f"ℹ️ {n_otros} operación(es) no facturable(s) (comerciales o formato inválido) — ver Excel.")
+
+            # ── Descarga ────────────────────────────────────────────
+            st.divider()
+            with st.spinner("Generando Excel de auditoría..."):
+                excel_aud = generar_excel_auditoria(filas_aud, periodo=periodo_txt)
+            nombre_aud = f"auditoria_{date.today().strftime('%Y%m%d')}.xlsx"
+            st.download_button(
+                label=f"📥 Descargar {nombre_aud}",
+                data=excel_aud,
+                file_name=nombre_aud,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary",
+            )
 
 if __name__ == '__main__':
     main()
