@@ -25,9 +25,11 @@ st.set_page_config(
 # ─── Identidad visual Fudo ────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&display=swap');
 
-/* ── Tipografía — EXCLUYE íconos de Material Symbols ── */
+/* ═══════════════════════════════════════════════════════
+   TIPOGRAFÍA
+═══════════════════════════════════════════════════════ */
 html, body { font-family: 'Barlow', sans-serif !important; }
 p, label, input, textarea, select,
 [data-testid="stMarkdownContainer"],
@@ -39,116 +41,248 @@ p, label, input, textarea, select,
 button:not([data-testid="stFileUploaderDeleteBtn"]) {
     font-family: 'Barlow', sans-serif !important;
 }
-
-/* ── Preservar fuente de íconos Material (evita "uploadupload" y ".arro") ── */
+/* Preservar íconos Material (evita "uploadupload" y ".arro") */
 [data-testid="stIconMaterial"],
-span[class*="material"],
-span[class*="Material"] {
+span[class*="material"], span[class*="Material"] {
     font-family: 'Material Symbols Rounded', 'Material Icons' !important;
 }
 
-/* ── Fondo ── */
-[data-testid="stAppViewContainer"] > .main { background-color: #FFFFFF; }
+/* ═══════════════════════════════════════════════════════
+   FONDO Y LAYOUT
+═══════════════════════════════════════════════════════ */
+[data-testid="stAppViewContainer"] > .main {
+    background-color: #F8F8FC !important;
+}
+[data-testid="block-container"] {
+    padding-top: 1.8rem !important;
+    padding-bottom: 3rem !important;
+}
 
-/* ── Títulos ── */
-h1 { color: #FF5023 !important; font-weight: 700 !important; }
+/* ═══════════════════════════════════════════════════════
+   TÍTULOS
+═══════════════════════════════════════════════════════ */
+h1 { color: #FF5023 !important; font-weight: 700 !important; letter-spacing: -0.3px !important; }
 h2, h3 { color: #3938A0 !important; font-weight: 700 !important; }
 h4, h5, h6 { color: #3B3B3B !important; font-weight: 600 !important; }
 
-/* ── Sidebar ── */
-[data-testid="stSidebar"] { background-color: #3938A0 !important; }
+/* ═══════════════════════════════════════════════════════
+   SIDEBAR — lavanda suave, texto azul oscuro
+═══════════════════════════════════════════════════════ */
+[data-testid="stSidebar"] {
+    background-color: #F0F0FA !important;
+    border-right: 1px solid #DCDCF0 !important;
+}
+/* Texto general en sidebar */
 [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 { color: #FFFFFF !important; }
-[data-testid="stSidebar"] label { color: #FFFFFF !important; font-weight: 600 !important; }
-/* Caption / email en sidebar — visible sobre fondo azul */
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] span:not([class*="material"]):not([class*="Material"]) {
+    color: #3938A0 !important;
+}
+[data-testid="stSidebar"] label {
+    color: #3938A0 !important;
+    font-weight: 600 !important;
+}
+/* Radio labels */
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+    color: #3B3B3B !important;
+    font-weight: 500 !important;
+}
+/* Selectbox labels */
+[data-testid="stSidebar"] [data-testid="stSelectbox"] label {
+    color: #3938A0 !important;
+    font-weight: 600 !important;
+    font-size: 12px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+}
+/* Email y versión en sidebar */
 [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
-    color: #FFC9BB !important;
+    color: #8888B8 !important;
     font-size: 12px !important;
 }
+/* Leyenda en sidebar */
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    color: #5F5FC4 !important;
+    font-size: 12px !important;
+}
+/* Divisor en sidebar */
+[data-testid="stSidebar"] hr { border-color: #DCDCF0 !important; }
 
-/* ── Botón primario ── */
+/* ═══════════════════════════════════════════════════════
+   BOTÓN PRIMARIO
+═══════════════════════════════════════════════════════ */
 button[data-testid="baseButton-primary"] {
     background-color: #FF5023 !important;
     border: none !important;
     color: #FFFFFF !important;
     font-weight: 700 !important;
-    border-radius: 6px !important;
+    border-radius: 8px !important;
     font-size: 15px !important;
+    letter-spacing: 0.2px !important;
+    box-shadow: 0 2px 8px rgba(255,80,35,0.25) !important;
+    transition: all 0.15s ease !important;
 }
-button[data-testid="baseButton-primary"]:hover { background-color: #e04010 !important; }
+button[data-testid="baseButton-primary"]:hover {
+    background-color: #E8441A !important;
+    box-shadow: 0 4px 12px rgba(255,80,35,0.35) !important;
+    transform: translateY(-1px) !important;
+}
 
-/* ── Botón secundario ── */
+/* ═══════════════════════════════════════════════════════
+   BOTÓN SECUNDARIO
+═══════════════════════════════════════════════════════ */
 button[data-testid="baseButton-secondary"] {
-    border: 1.5px solid #3938A0 !important;
+    background-color: #FFFFFF !important;
+    border: 1.5px solid #C8C8E8 !important;
     color: #3938A0 !important;
     font-weight: 600 !important;
-    border-radius: 6px !important;
+    border-radius: 8px !important;
 }
-button[data-testid="baseButton-secondary"]:hover { background-color: #E1E1F5 !important; }
+button[data-testid="baseButton-secondary"]:hover {
+    background-color: #F0F0FA !important;
+    border-color: #3938A0 !important;
+}
 
-/* ── Botones de descarga ── */
+/* ═══════════════════════════════════════════════════════
+   BOTONES DE DESCARGA
+═══════════════════════════════════════════════════════ */
 [data-testid="stDownloadButton"] button {
+    background-color: #FFFFFF !important;
+    color: #3938A0 !important;
+    border: 1.5px solid #3938A0 !important;
+    font-weight: 700 !important;
+    border-radius: 8px !important;
+    transition: all 0.15s ease !important;
+}
+[data-testid="stDownloadButton"] button:hover {
+    background-color: #F0F0FA !important;
+    border-color: #5F5FC4 !important;
+}
+[data-testid="stDownloadButton"] button[data-testid="baseButton-primary"] {
     background-color: #3938A0 !important;
     color: #FFFFFF !important;
-    border: none !important;
-    font-weight: 700 !important;
-    border-radius: 6px !important;
-}
-[data-testid="stDownloadButton"] button:hover { background-color: #5F5FC4 !important; }
-[data-testid="stDownloadButton"] button[data-testid="baseButton-primary"] {
-    background-color: #FF5023 !important;
+    border-color: #3938A0 !important;
+    box-shadow: 0 2px 8px rgba(57,56,160,0.2) !important;
 }
 [data-testid="stDownloadButton"] button[data-testid="baseButton-primary"]:hover {
-    background-color: #e04010 !important;
+    background-color: #2D2C8A !important;
 }
 
-/* ── Métricas ── */
+/* ═══════════════════════════════════════════════════════
+   MÉTRICAS
+═══════════════════════════════════════════════════════ */
 [data-testid="metric-container"] {
-    background-color: #E1E1F5 !important;
-    border-radius: 8px !important;
-    padding: 14px 16px !important;
-    border-left: 4px solid #3938A0 !important;
+    background-color: #FFFFFF !important;
+    border-radius: 10px !important;
+    padding: 16px 18px !important;
+    border-left: 4px solid #FF5023 !important;
+    box-shadow: 0 1px 6px rgba(57,56,160,0.08) !important;
 }
-[data-testid="stMetricLabel"] label { color: #3938A0 !important; font-weight: 600 !important; }
-[data-testid="stMetricValue"]  div  { color: #FF5023 !important; font-weight: 700 !important; }
+[data-testid="stMetricLabel"] label {
+    color: #5F5FC4 !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.4px !important;
+}
+[data-testid="stMetricValue"] div {
+    color: #3938A0 !important;
+    font-weight: 700 !important;
+    font-size: 26px !important;
+}
+[data-testid="stMetricDelta"] { color: #5F5FC4 !important; }
 
-/* ── Expander: solo borde, sin tocar summary ni íconos ── */
+/* ═══════════════════════════════════════════════════════
+   EXPANDERS
+═══════════════════════════════════════════════════════ */
 [data-testid="stExpander"] details {
-    border: 1.5px solid #FF5023 !important;
-    border-radius: 8px !important;
+    background-color: #FFFFFF !important;
+    border: 1px solid #DCDCF0 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 4px rgba(57,56,160,0.05) !important;
+}
+[data-testid="stExpander"] details:hover {
+    border-color: #A0A0D0 !important;
+}
+[data-testid="stExpander"] details[open] {
+    border-color: #5F5FC4 !important;
 }
 
-/* ── File uploader ── */
+/* ═══════════════════════════════════════════════════════
+   FILE UPLOADER
+═══════════════════════════════════════════════════════ */
 [data-testid="stFileUploaderDropzone"] {
-    border: 1.5px dashed #5F5FC4 !important;
-    border-radius: 6px !important;
-    background-color: #FAFAFF !important;
+    background-color: #FAFAFE !important;
+    border: 1.5px dashed #A8A8D0 !important;
+    border-radius: 8px !important;
+    transition: border-color 0.15s !important;
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+    border-color: #5F5FC4 !important;
+    background-color: #F4F4FC !important;
 }
 
-/* ── Formulario ── */
+/* ═══════════════════════════════════════════════════════
+   FORMULARIOS
+═══════════════════════════════════════════════════════ */
 [data-testid="stForm"] {
-    border: 1.5px solid #E1E1F5 !important;
+    background-color: #FAFAFE !important;
+    border: 1px solid #E4E4F2 !important;
     border-radius: 10px !important;
 }
 
-/* ── Divisor ── */
-hr { border-color: #E1E1F5 !important; opacity: 0.6; }
+/* ═══════════════════════════════════════════════════════
+   DIVISORES
+═══════════════════════════════════════════════════════ */
+hr { border-color: #E4E4F2 !important; opacity: 1 !important; }
 
-/* ── Caption fuera del sidebar ── */
-[data-testid="stCaptionContainer"] p { color: #C6C6C6 !important; }
+/* ═══════════════════════════════════════════════════════
+   CAPTIONS
+═══════════════════════════════════════════════════════ */
+[data-testid="stCaptionContainer"] p {
+    color: #9090B8 !important;
+    font-size: 13px !important;
+}
 
-/* ── Tablas markdown ── */
-table { border-collapse: collapse; width: 100%; }
+/* ═══════════════════════════════════════════════════════
+   ALERTAS — tonos suaves
+═══════════════════════════════════════════════════════ */
+[data-testid="stAlert"][data-baseweb="notification"] {
+    border-radius: 8px !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   TABLAS MARKDOWN
+═══════════════════════════════════════════════════════ */
+table { border-collapse: collapse; width: 100%; border-radius: 8px; overflow: hidden; }
 th {
     background-color: #3938A0 !important;
     color: #FFFFFF !important;
-    font-weight: 700 !important;
-    padding: 8px 12px !important;
+    font-weight: 600 !important;
+    padding: 10px 14px !important;
+    font-size: 13px !important;
+    letter-spacing: 0.3px !important;
 }
-td { padding: 6px 12px !important; border-bottom: 1px solid #E1E1F5 !important; }
-tr:nth-child(even) td { background-color: #FAFAFF !important; }
+td { padding: 8px 14px !important; border-bottom: 1px solid #EEEEFC !important; font-size: 14px !important; }
+tr:nth-child(even) td { background-color: #F8F8FD !important; }
+tr:hover td { background-color: #F0F0FA !important; }
+
+/* ═══════════════════════════════════════════════════════
+   INPUTS Y SELECTS
+═══════════════════════════════════════════════════════ */
+[data-baseweb="input"] > div,
+[data-baseweb="select"] > div:first-child {
+    border-color: #D0D0E8 !important;
+    border-radius: 8px !important;
+    background-color: #FFFFFF !important;
+}
+[data-baseweb="input"] > div:focus-within,
+[data-baseweb="select"] > div:focus-within {
+    border-color: #5F5FC4 !important;
+    box-shadow: 0 0 0 2px rgba(95,95,196,0.15) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,17 +300,18 @@ def check_access():
     extra_emails = {e.strip().lower() for e in extra_raw.split(",") if e.strip()}
 
     st.markdown("""
-    <div style="max-width:440px; margin:80px auto 0;">
-        <div style="background:#FF5023; border-radius:10px; padding:28px 32px 18px;
-                    margin-bottom:24px; text-align:center;">
-            <div style="font-family:'Barlow',sans-serif; font-size:26px;
-                        font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
-                🧾 Facturación Fudo
-            </div>
-            <div style="font-family:'Barlow',sans-serif; font-size:13px;
-                        color:#FFC9BB; margin-top:4px;">
-                Anser Indicus SPA — ingresá con tu correo corporativo
-            </div>
+    <div style="max-width:420px; margin:80px auto 32px; text-align:center;">
+        <div style="display:inline-flex; align-items:center; gap:10px; margin-bottom:12px;">
+            <div style="width:40px; height:40px; background:#FF5023; border-radius:10px;
+                        display:flex; align-items:center; justify-content:center;
+                        font-size:20px; line-height:1;">🧾</div>
+            <span style="font-family:'Barlow',sans-serif; font-size:24px;
+                         font-weight:700; color:#3938A0; letter-spacing:-0.4px;">
+                Facturación Fudo
+            </span>
+        </div>
+        <div style="font-family:'Barlow',sans-serif; font-size:13px; color:#9090B8;">
+            Ingresá con tu correo corporativo para continuar
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -435,59 +570,50 @@ def get_billing(id_cuenta, billing_raw, rl):
         datos['Comuna'], datos['Domicilio'] = domicilio, comuna
     return datos
 
-# ─── Lectura de comprobantes MP (visión) ──────────────────────────────────────
+# ─── Lectura de comprobantes MP (visión — Google Gemini) ──────────────────────
 def parsear_comprobante(imagen_bytes: bytes, mime_type: str) -> dict:
     """
-    Usa Claude Haiku para extraer datos de un comprobante de MP.
+    Usa Gemini Flash para extraer datos de un comprobante de MP.
     Retorna dict con: operation_id, referencia, monto, fecha
     Lanza ValueError si no se pudo parsear.
     """
     try:
-        import anthropic as _anthropic
+        import google.generativeai as genai
     except ImportError:
-        raise ValueError("Librería 'anthropic' no instalada. Agregala a requirements.txt.")
+        raise ValueError("Librería 'google-generativeai' no instalada.")
 
-    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    api_key = st.secrets.get("GOOGLE_API_KEY", "")
     if not api_key:
-        raise ValueError("Falta ANTHROPIC_API_KEY en Streamlit Secrets.")
+        raise ValueError("Falta GOOGLE_API_KEY en Streamlit Secrets.")
 
-    img_b64 = base64.standard_b64encode(imagen_bytes).decode("utf-8")
-    client  = _anthropic.Anthropic(api_key=api_key)
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     prompt = (
         "Analizá este comprobante de Mercado Pago y extraé los siguientes datos en JSON:\n"
         "{\n"
         '  "operation_id": "número de operación (solo dígitos, sin espacios)",\n'
-        '  "referencia": "referencia adicional completa (ej: TFP:372131:1:Kioto bistro o '
-        'Terminal:1234:1:Nombre o comisiones@slug)",\n'
-        '  "monto": número total cobrado al cliente (el más grande, sin puntos ni comas, como entero o decimal),\n'
+        '  "referencia": "referencia adicional completa tal como aparece '
+        '(ej: TFP:372131:1:Kioto bistro o Terminal:1234:1:Nombre o comisiones@slug)",\n'
+        '  "monto": número total cobrado al cliente (el importe más grande que aparece, '
+        'sin puntos de miles ni comas, como número),\n'
         '  "fecha": "fecha en formato YYYY-MM-DD"\n'
         "}\n"
         "Respondé SOLO el JSON, sin texto adicional ni bloques de código."
     )
 
-    resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image",
-                 "source": {"type": "base64", "media_type": mime_type, "data": img_b64}},
-                {"type": "text", "text": prompt},
-            ],
-        }],
-    )
-    raw = resp.content[0].text.strip()
-    # Tolerar bloques ```json ... ```
+    resp = model.generate_content([
+        {"mime_type": mime_type, "data": imagen_bytes},
+        prompt,
+    ])
+    raw = resp.text.strip()
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
     datos = json.loads(raw)
-    # Validar campos mínimos
     for campo in ("operation_id", "referencia", "monto", "fecha"):
         if campo not in datos:
-            raise ValueError(f"Campo '{campo}' no encontrado en respuesta del modelo.")
+            raise ValueError(f"Campo '{campo}' no encontrado en la respuesta.")
     datos["operation_id"] = str(datos["operation_id"]).strip()
     datos["monto"]        = float(str(datos["monto"]).replace(",", "."))
     return datos
@@ -1351,13 +1477,20 @@ def main():
 
     # ── Header ─────────────────────────────────────────────────
     st.markdown("""
-    <div style="background:#FF5023; border-radius:10px; padding:22px 28px 16px; margin-bottom:8px;">
-        <span style="font-family:'Barlow',sans-serif; font-size:26px; font-weight:700; color:#FFFFFF; letter-spacing:-0.5px;">
-            🧾 Facturación Terminales
-        </span><br>
-        <span style="font-family:'Barlow',sans-serif; font-size:13px; color:#FFC9BB; font-weight:400;">
-            Anser Indicus SPA — Procesador automático de cobranzas Mercado Pago
-        </span>
+    <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+        <div style="width:44px; height:44px; background:#FF5023; border-radius:10px;
+                    display:flex; align-items:center; justify-content:center;
+                    font-size:22px; flex-shrink:0;">🧾</div>
+        <div>
+            <div style="font-family:'Barlow',sans-serif; font-size:22px; font-weight:700;
+                        color:#3938A0; letter-spacing:-0.3px; line-height:1.2;">
+                Facturación Terminales
+            </div>
+            <div style="font-family:'Barlow',sans-serif; font-size:12px; color:#9090B8; margin-top:2px;">
+                Anser Indicus SPA — Procesador de cobranzas Mercado Pago
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1477,18 +1610,62 @@ def main():
             "Accounts CSV  *(necesario para Deuda fija)*", type=['csv'],
             help="accounts_FECHA.csv exportado de dash.fu.do")
 
-    # ── Comprobantes manuales ────────────────────────────────────
+    # ── Pagos manuales (no en collection) ───────────────────────
     with st.expander("📎 Pagos recientes no incluidos en el collection *(opcional)*"):
-        st.caption(
-            "Si el reporte de MP todavía no tiene los últimos pagos, podés subir "
-            "capturas de los comprobantes. Se agregarán automáticamente al Excel."
-        )
-        f_comprobantes = st.file_uploader(
-            "Comprobantes Mercado Pago (imágenes)",
-            type=["png", "jpg", "jpeg", "webp"],
-            accept_multiple_files=True,
-            key="comprobantes_img",
-        )
+        tiene_gemini = bool(st.secrets.get("GOOGLE_API_KEY", ""))
+        if tiene_gemini:
+            st.caption("Subí capturas de comprobantes — Gemini extrae los datos automáticamente.")
+            f_comprobantes = st.file_uploader(
+                "Comprobantes Mercado Pago",
+                type=["png", "jpg", "jpeg", "webp"],
+                accept_multiple_files=True,
+                key="comprobantes_img",
+            )
+        else:
+            f_comprobantes = []
+            st.caption(
+                "Ingresá los datos del comprobante manualmente (MP → detalle del pago). "
+                "Para carga automática por imagen, configurá `GOOGLE_API_KEY` en Secrets."
+            )
+        if "pagos_extra" not in st.session_state:
+            st.session_state["pagos_extra"] = []
+
+        with st.form("form_pago_extra", clear_on_submit=True):
+            pe1, pe2, pe3, pe4 = st.columns([2, 3, 1.5, 1.5])
+            with pe1:
+                pe_opid  = st.text_input("N° de operación", placeholder="171378683486")
+            with pe2:
+                pe_ref   = st.text_input("Referencia adicional", placeholder="TFP:372131:1:Kioto bistro")
+            with pe3:
+                pe_monto = st.number_input("Monto $", min_value=0.0, step=1.0, format="%.0f")
+            with pe4:
+                pe_fecha = st.date_input("Fecha", value=date.today())
+            agregar = st.form_submit_button("➕ Agregar pago", use_container_width=True)
+            if agregar:
+                if pe_opid.strip() and pe_ref.strip() and pe_monto > 0:
+                    st.session_state["pagos_extra"].append({
+                        "operation_id": pe_opid.strip(),
+                        "referencia":   pe_ref.strip(),
+                        "monto":        float(pe_monto),
+                        "fecha":        pe_fecha.strftime("%Y-%m-%d"),
+                    })
+                    st.rerun()
+                else:
+                    st.warning("Completá todos los campos.")
+
+        if st.session_state["pagos_extra"]:
+            st.markdown(f"**{len(st.session_state['pagos_extra'])} pago(s) agregado(s):**")
+            for i, p in enumerate(st.session_state["pagos_extra"]):
+                c1, c2 = st.columns([9, 1])
+                with c1:
+                    st.markdown(
+                        f"- `{p['operation_id']}` — {p['referencia']} — "
+                        f"**${p['monto']:,.0f}** — {p['fecha']}"
+                    )
+                with c2:
+                    if st.button("✕", key=f"del_pe_{i}"):
+                        st.session_state["pagos_extra"].pop(i)
+                        st.rerun()
 
     # ── Botón ───────────────────────────────────────────────────
     st.divider()
@@ -1508,34 +1685,36 @@ def main():
             except Exception as e:
                 st.error(f"❌ **Collection** ({f_col.name}): {e}"); return
 
-            # ── Comprobantes manuales ────────────────────────────
+            # ── Imágenes → Gemini ────────────────────────────────
+            parsed_auto = []
             if f_comprobantes:
-                parsed_ok   = []
-                parsed_err  = []
-                with st.spinner(f"Leyendo {len(f_comprobantes)} comprobante(s)..."):
+                ext_map = {'jpg':'image/jpeg','jpeg':'image/jpeg',
+                           'png':'image/png','webp':'image/webp'}
+                with st.spinner(f"Leyendo {len(f_comprobantes)} comprobante(s) con Gemini..."):
                     for img_file in f_comprobantes:
                         img_bytes = img_file.read()
-                        ext       = img_file.name.rsplit('.', 1)[-1].lower()
-                        mime_map  = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-                                     'png': 'image/png', 'webp': 'image/webp'}
-                        mime      = mime_map.get(ext, 'image/png')
+                        mime = ext_map.get(img_file.name.rsplit('.',1)[-1].lower(), 'image/png')
                         try:
                             datos = parsear_comprobante(img_bytes, mime)
                             datos['_nombre'] = img_file.name
-                            parsed_ok.append(datos)
+                            parsed_auto.append(datos)
                         except Exception as e:
-                            parsed_err.append((img_file.name, str(e)))
-                if parsed_ok:
-                    df_extra = comprobantes_a_df(parsed_ok, cols)
-                    # Asegurar columnas faltantes en df_c antes del concat
-                    for col in df_extra.columns:
-                        if col not in df_c.columns:
-                            df_c[col] = ''
-                    df_c = pd.concat([df_c, df_extra], ignore_index=True)
-                    nombres = ", ".join(d['_nombre'] for d in parsed_ok)
-                    st.success(f"✅ {len(parsed_ok)} comprobante(s) agregado(s): {nombres}")
-                for nombre, err in parsed_err:
-                    st.warning(f"⚠️ No se pudo leer **{nombre}**: {err}")
+                            st.warning(f"⚠️ No se pudo leer **{img_file.name}**: {e}")
+
+            # ── Pagos manuales + imágenes parseadas → df_c ───────
+            todos = parsed_auto + st.session_state.get("pagos_extra", [])
+            if todos:
+                df_extra = comprobantes_a_df(todos, cols)
+                for col in df_extra.columns:
+                    if col not in df_c.columns:
+                        df_c[col] = ''
+                df_c = pd.concat([df_c, df_extra], ignore_index=True)
+                n_img = len(parsed_auto)
+                n_man = len(st.session_state.get("pagos_extra", []))
+                partes = []
+                if n_img: partes.append(f"{n_img} comprobante(s) leído(s) por Gemini")
+                if n_man: partes.append(f"{n_man} pago(s) ingresado(s) manualmente")
+                st.success(f"✅ {' + '.join(partes)} incorporado(s) al procesamiento.")
             try:
                 billing_raw = leer_billing(f_bil)
             except Exception as e:
@@ -1708,12 +1887,19 @@ def main():
     # ══════════════════════════════════════════════════════════
     if "PASO 3" in paso:
         st.markdown("""
-        <div style="background:#3938A0; border-radius:10px; padding:18px 24px 14px; margin-bottom:12px;">
-            <div style="font-family:'Barlow',sans-serif; font-size:20px; font-weight:700; color:#FFFFFF;">
-                🔍 Auditoría de facturación
-            </div>
-            <div style="font-family:'Barlow',sans-serif; font-size:13px; color:#E1E1F5; margin-top:4px;">
-                Verificá que todas las operaciones del período estén correctamente facturadas
+        <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                    padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+            <div style="width:40px; height:40px; background:#3938A0; border-radius:10px;
+                        display:flex; align-items:center; justify-content:center;
+                        font-size:20px; flex-shrink:0;">🔍</div>
+            <div>
+                <div style="font-family:'Barlow',sans-serif; font-size:20px; font-weight:700;
+                            color:#3938A0; letter-spacing:-0.3px; line-height:1.2;">
+                    Auditoría de facturación
+                </div>
+                <div style="font-family:'Barlow',sans-serif; font-size:12px; color:#9090B8; margin-top:2px;">
+                    Verificá que todas las operaciones del período estén correctamente facturadas
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
