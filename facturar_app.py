@@ -3,7 +3,7 @@
 Facturación Terminales — Anser Indicus SPA
 Interfaz web Streamlit v1.0
 """
-import io, re, unicodedata
+import io, re, unicodedata, json, base64
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -434,6 +434,84 @@ def get_billing(id_cuenta, billing_raw, rl):
         datos = dict(datos)
         datos['Comuna'], datos['Domicilio'] = domicilio, comuna
     return datos
+
+# ─── Lectura de comprobantes MP (visión) ──────────────────────────────────────
+def parsear_comprobante(imagen_bytes: bytes, mime_type: str) -> dict:
+    """
+    Usa Claude Haiku para extraer datos de un comprobante de MP.
+    Retorna dict con: operation_id, referencia, monto, fecha
+    Lanza ValueError si no se pudo parsear.
+    """
+    try:
+        import anthropic as _anthropic
+    except ImportError:
+        raise ValueError("Librería 'anthropic' no instalada. Agregala a requirements.txt.")
+
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise ValueError("Falta ANTHROPIC_API_KEY en Streamlit Secrets.")
+
+    img_b64 = base64.standard_b64encode(imagen_bytes).decode("utf-8")
+    client  = _anthropic.Anthropic(api_key=api_key)
+
+    prompt = (
+        "Analizá este comprobante de Mercado Pago y extraé los siguientes datos en JSON:\n"
+        "{\n"
+        '  "operation_id": "número de operación (solo dígitos, sin espacios)",\n'
+        '  "referencia": "referencia adicional completa (ej: TFP:372131:1:Kioto bistro o '
+        'Terminal:1234:1:Nombre o comisiones@slug)",\n'
+        '  "monto": número total cobrado al cliente (el más grande, sin puntos ni comas, como entero o decimal),\n'
+        '  "fecha": "fecha en formato YYYY-MM-DD"\n'
+        "}\n"
+        "Respondé SOLO el JSON, sin texto adicional ni bloques de código."
+    )
+
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": mime_type, "data": img_b64}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+    raw = resp.content[0].text.strip()
+    # Tolerar bloques ```json ... ```
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1].lstrip("json").strip() if len(parts) >= 2 else raw
+    datos = json.loads(raw)
+    # Validar campos mínimos
+    for campo in ("operation_id", "referencia", "monto", "fecha"):
+        if campo not in datos:
+            raise ValueError(f"Campo '{campo}' no encontrado en respuesta del modelo.")
+    datos["operation_id"] = str(datos["operation_id"]).strip()
+    datos["monto"]        = float(str(datos["monto"]).replace(",", "."))
+    return datos
+
+
+def comprobantes_a_df(parsed: list[dict], cols: dict) -> pd.DataFrame:
+    """
+    Convierte lista de comprobantes parseados a DataFrame compatible con df_c.
+    La 'referencia' (TFP:/Terminal:/comisiones@...) se coloca en desc y extref
+    para que procesar() la detecte igual que en el collection.
+    """
+    filas = []
+    for d in parsed:
+        ref = str(d.get("referencia", "")).strip()
+        filas.append({
+            cols["opid"]:   d["operation_id"],
+            cols["desc"]:   ref,          # mask_reason lo detecta si empieza con TFP:/Terminal:
+            cols["extref"]: ref,          # mask_extref como fallback
+            cols["monto"]:  d["monto"],
+            cols["fecha"]:  d["fecha"],
+            cols["op"]:     "",
+        })
+    return pd.DataFrame(filas)
+
 
 # ─── Procesamiento principal ──────────────────────────────────────────────────
 def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
@@ -1399,6 +1477,19 @@ def main():
             "Accounts CSV  *(necesario para Deuda fija)*", type=['csv'],
             help="accounts_FECHA.csv exportado de dash.fu.do")
 
+    # ── Comprobantes manuales ────────────────────────────────────
+    with st.expander("📎 Pagos recientes no incluidos en el collection *(opcional)*"):
+        st.caption(
+            "Si el reporte de MP todavía no tiene los últimos pagos, podés subir "
+            "capturas de los comprobantes. Se agregarán automáticamente al Excel."
+        )
+        f_comprobantes = st.file_uploader(
+            "Comprobantes Mercado Pago (imágenes)",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=True,
+            key="comprobantes_img",
+        )
+
     # ── Botón ───────────────────────────────────────────────────
     st.divider()
     archivos_ok = all([f_col, f_bil, f_con, f_odo])
@@ -1416,6 +1507,35 @@ def main():
                 df_c, cols = leer_collection(f_col)
             except Exception as e:
                 st.error(f"❌ **Collection** ({f_col.name}): {e}"); return
+
+            # ── Comprobantes manuales ────────────────────────────
+            if f_comprobantes:
+                parsed_ok   = []
+                parsed_err  = []
+                with st.spinner(f"Leyendo {len(f_comprobantes)} comprobante(s)..."):
+                    for img_file in f_comprobantes:
+                        img_bytes = img_file.read()
+                        ext       = img_file.name.rsplit('.', 1)[-1].lower()
+                        mime_map  = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+                                     'png': 'image/png', 'webp': 'image/webp'}
+                        mime      = mime_map.get(ext, 'image/png')
+                        try:
+                            datos = parsear_comprobante(img_bytes, mime)
+                            datos['_nombre'] = img_file.name
+                            parsed_ok.append(datos)
+                        except Exception as e:
+                            parsed_err.append((img_file.name, str(e)))
+                if parsed_ok:
+                    df_extra = comprobantes_a_df(parsed_ok, cols)
+                    # Asegurar columnas faltantes en df_c antes del concat
+                    for col in df_extra.columns:
+                        if col not in df_c.columns:
+                            df_c[col] = ''
+                    df_c = pd.concat([df_c, df_extra], ignore_index=True)
+                    nombres = ", ".join(d['_nombre'] for d in parsed_ok)
+                    st.success(f"✅ {len(parsed_ok)} comprobante(s) agregado(s): {nombres}")
+                for nombre, err in parsed_err:
+                    st.warning(f"⚠️ No se pudo leer **{nombre}**: {err}")
             try:
                 billing_raw = leer_billing(f_bil)
             except Exception as e:
