@@ -621,18 +621,42 @@ def parsear_comprobante(imagen_bytes: bytes, mime_type: str) -> dict:
 
 def comprobantes_a_df(parsed: list[dict], cols: dict) -> pd.DataFrame:
     """
-    Convierte lista de comprobantes parseados a DataFrame compatible con df_c.
-    La 'referencia' (TFP:/Terminal:/comisiones@...) se coloca en desc y extref
-    para que procesar() la detecte igual que en el collection.
+    Convierte lista de comprobantes/pagos manuales a DataFrame compatible con df_c.
+
+    parse_tfp() necesita el precio dentro de la referencia (TFP:id:qty;precio:nombre).
+    El comprobante de MP solo muestra TFP:id:count:nombre (sin precio), por lo que
+    reconstruimos la referencia con el monto embebido para que procesar() la procese.
     """
     filas = []
     for d in parsed:
-        ref = str(d.get("referencia", "")).strip()
+        ref   = str(d.get("referencia", "")).strip()
+        monto = float(d["monto"])
+
+        if ref.startswith("TFP:"):
+            parts = ref.split(":")
+            if len(parts) >= 3:
+                account_id = parts[1].strip()
+                nombre     = ":".join(parts[3:]).strip() if len(parts) > 3 else parts[2].strip()
+                # Si no hay ningún ";" en la ref, no tiene precio → embeber monto
+                if not any(";" in p for p in parts[2:]):
+                    ref = f"TFP:{account_id}:1;{monto:.0f}:{nombre}"
+
+        elif ref.startswith("Terminal:"):
+            parts = ref.split(":")
+            # Terminal:id:qty:precio:sku:nombre — si falta precio, embeber monto
+            if len(parts) >= 3:
+                try:
+                    float(parts[3]) if len(parts) > 3 else (_ for _ in ()).throw(ValueError())
+                except (ValueError, StopIteration):
+                    account_id = parts[1].strip()
+                    nombre     = ":".join(parts[2:]).strip()
+                    ref = f"Terminal:{account_id}:1:{monto:.0f}::{nombre}"
+
         filas.append({
             cols["opid"]:   d["operation_id"],
-            cols["desc"]:   ref,          # mask_reason lo detecta si empieza con TFP:/Terminal:
-            cols["extref"]: ref,          # mask_extref como fallback
-            cols["monto"]:  d["monto"],
+            cols["desc"]:   ref,
+            cols["extref"]: ref,
+            cols["monto"]:  monto,
             cols["fecha"]:  d["fecha"],
             cols["op"]:     "",
         })
