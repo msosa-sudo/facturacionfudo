@@ -499,11 +499,11 @@ def leer_billing(f):
     return df.set_index('ID')[['RUT_clean','Razón social','Nombre','Giro','Domicilio','Comuna','Email']].to_dict('index')
 
 def inferir_tipo_id(nif: str) -> str:
-    """VAT si el NIF termina en -dígito o -K, Pasaporte si no."""
+    """RUT si el NIF termina en -dígito o -K (formato chileno), Pasaporte si no."""
     nif = str(nif or '').strip()
     parts = nif.split('-')
     if len(parts) == 2 and len(parts[1]) == 1 and parts[1].upper() in '0123456789K':
-        return 'VAT'
+        return 'RUT'
     return 'Pasaporte'
 
 def leer_contactos(f):
@@ -1131,7 +1131,7 @@ def generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs):
             f"{id_c}_old",
             ex.get('nombre', c['nombre_cuenta']),
             ex.get('nif_raw', c['RUT_odoo']),
-            ex.get('tipo_id', 'VAT'),
+            ex.get('tipo_id', 'RUT'),
             ex.get('email', ''),
             'Chile',
             f"https://dash.fu.do/accounts/{id_c}_old",
@@ -1179,7 +1179,7 @@ def generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs):
             id_c,
             nombre_nuevo,
             ex.get('nif_raw', c['RUT']),
-            ex.get('tipo_id', 'VAT'),
+            ex.get('tipo_id', 'RUT'),
             email_nuevo,
             'Chile',
             f"https://dash.fu.do/accounts/{id_c}",
