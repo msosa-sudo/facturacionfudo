@@ -498,6 +498,14 @@ def leer_billing(f):
     df['ID'] = df['ID'].astype(str).str.strip()
     return df.set_index('ID')[['RUT_clean','Razón social','Nombre','Giro','Domicilio','Comuna','Email']].to_dict('index')
 
+def inferir_tipo_id(nif: str) -> str:
+    """VAT si el NIF termina en -dígito o -K, Pasaporte si no."""
+    nif = str(nif or '').strip()
+    parts = nif.split('-')
+    if len(parts) == 2 and len(parts[1]) == 1 and parts[1].upper() in '0123456789K':
+        return 'VAT'
+    return 'Pasaporte'
+
 def leer_contactos(f):
     df = pd.read_excel(f, dtype=str)
     df.columns = df.columns.str.strip()
@@ -518,13 +526,24 @@ def leer_contactos(f):
     _cols_odoo = {'razon_social': 'Nombre', 'giro': 'Giro',
                   'domicilio': 'Nombre de la calle', 'comuna': 'Ciudad'}
     ref_to_odoo_datos = {}
+    ref_to_extra      = {}
+    _col_email = next((c for c in ['Correo electrónico', 'Correo electronico', 'Email'] if c in df.columns), None)
     for _, r in df.iterrows():
         ref = str(r.get('Referencia', '')).strip()
-        if ref and ref != 'nan':
-            ref_to_odoo_datos[ref] = {
-                c: str(r.get(co, '') or '').strip()
-                for c, co in _cols_odoo.items() if co in df.columns
-            }
+        if not ref or ref == 'nan':
+            continue
+        ref_to_odoo_datos[ref] = {
+            c: str(r.get(co, '') or '').strip()
+            for c, co in _cols_odoo.items() if co in df.columns
+        }
+        nif_raw = str(r.get('NIF', '') or '').strip()
+        ref_to_extra[ref] = {
+            'external_id': str(r.get('ID', '') or '').strip(),
+            'nif_raw':     nif_raw,
+            'tipo_id':     inferir_tipo_id(nif_raw),
+            'email':       str(r.get(_col_email, '') or '').strip() if _col_email else '',
+            'nombre':      str(r.get('Nombre', '') or '').strip(),
+        }
     return {
         'ref_to_dbid':       df.set_index('Referencia_clean')['DB_ID'].to_dict(),
         'ref_to_nif':        df.set_index('Referencia_clean')['NIF_clean'].to_dict(),
@@ -532,6 +551,7 @@ def leer_contactos(f):
         'nif_to_dbid':       df.set_index('NIF_clean')['DB_ID'].to_dict(),
         'nif_to_ref':        df.set_index('NIF_clean')['Referencia_clean'].to_dict(),
         'ref_to_odoo_datos': ref_to_odoo_datos,
+        'ref_to_extra':      ref_to_extra,
     }
 
 def leer_odoo(f):
@@ -797,6 +817,10 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         razon       = billing.get('Razón social', '')
         sin_datos   = (rut_billing == 'NO ENCONTRADO')
         es_cf       = limpiar_rut(rut_billing) == '111111111'
+        # Fallback: cuenta en Odoo con RUT consumidor final pero sin billing data
+        if sin_datos and limpiar_rut(rut_odoo) == '111111111':
+            sin_datos = False
+            es_cf     = True
         fecha_t     = str(row.get(col_fecha, '')).strip().split(' ')[0]
         if fecha_t == 'nan': fecha_t = ''
 
@@ -835,7 +859,7 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
         return [], [], [], [], []
     df_all = pd.concat(frames, ignore_index=True).drop_duplicates('id_cuenta')
 
-    casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro = [], [], [], [], []
+    casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar = [], [], [], [], [], []
 
     for _, row in df_all.iterrows():
         id_c        = row['id_cuenta']
@@ -859,17 +883,33 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                     casos_dc.append({
                         'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
                         'db_id': row['db_id'], 'RUT': rut_billing,
-                        'razon_social': row['razon_social'], 'diffs': diffs
+                        'razon_social': row['razon_social'], 'email': row['email'],
+                        'diffs': diffs
                     })
             else:
-                casos_act.append({
+                base = {
                     'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
                     'RUT_billing': rut_billing, 'RUT_odoo': rut_odoo,
                     'razon_social': row['razon_social'], 'db_id': row['db_id'],
                     'giro': row['giro'], 'domicilio': row['domicilio'],
                     'comuna': row['comuna'], 'email': row['email'],
                     'region': buscar_region(row['comuna'], rl)
-                })
+                }
+                rut_odoo_clean = limpiar_rut(rut_odoo)
+                if rut_odoo_clean in ('', 'nan'):
+                    # Contacto existe en Odoo sin RUT → solo actualizar datos
+                    casos_actualizar.append(base)
+                else:
+                    # RUT distinto y no vacío → archivar con _old + crear nuevo
+                    casos_act.append(base)
+                    casos_crear.append({
+                        'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                        'RUT': rut_billing, 'razon_social': row['razon_social'],
+                        'giro': row['giro'], 'domicilio': row['domicilio'],
+                        'comuna': row['comuna'], 'email': row['email'],
+                        'region': buscar_region(row['comuna'], rl),
+                        'rut_ya_existe': False
+                    })
         elif rut_en_odoo:
             rut_clean  = limpiar_rut(rut_billing)
             ref_exist  = nif_to_ref.get(rut_clean, '')
@@ -897,7 +937,7 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                 'region': buscar_region(row['comuna'], rl)
             })
 
-    return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro
+    return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar
 
 # ─── Generación Excel de Contactos ───────────────────────────────────────────
 def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl):
@@ -973,49 +1013,21 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
         value='🔴 Fila roja = sin RUT | 🟥 Celda roja = campo vacío | 🟨 Fila amarilla = RUT ya existe | 🔴S = SUPERA LÍMITE SII'
     ).font = Font(name='Arial', color='CC5500')
 
-    # Contactos a actualizar + sección en importación
+    # Hoja informativa para casos_act (referencia visual, no importar)
     if casos_act:
         ws_act = wb.create_sheet('⚠ Contactos a actualizar')
         aplicar_header(ws_act,
-            ['ID Cuenta','Nombre en MP','Razón Social (billing)','RUT billing','RUT en Odoo','DB_ID Odoo','Acción requerida'],
+            ['ID Cuenta','Nombre en MP','Razón Social (billing)','RUT billing','RUT en Odoo','DB_ID Odoo','Acción'],
             [12,30,35,18,18,12,55])
         ws_act.cell(row=1, column=7).fill = PatternFill('solid', start_color='CC0000')
         for row_idx, c in enumerate(casos_act, 2):
-            accion = f"1) Cambiar Referencia a '{c['id_cuenta']}_old'  |  2) Crear contacto nuevo"
+            accion = f"Ver archivo 'contactos_actualizar_*.xlsx': archivar _old + nuevo contacto ya incluido arriba"
             for col_idx, val in enumerate([c['id_cuenta'],c['nombre_cuenta'],c['razon_social'],
                                            c['RUT_billing'],c['RUT_odoo'],c['db_id'],accion], 1):
                 cell = ws_act.cell(row=row_idx, column=col_idx, value=val)
                 cell.font = Font(name='Arial', size=10); cell.fill = red_fill
                 cell.alignment = Alignment(vertical='center', wrap_text=True)
             ws_act.row_dimensions[row_idx].height = 35
-        # Agregar sección en hoja principal
-        next_row = len(casos_dedup) + 5
-        ws.cell(row=next_row, column=1,
-            value='CONTACTOS A ACTUALIZAR:').font = Font(bold=True, name='Arial', size=10, color='CC0000')
-        next_row += 1
-        for c in casos_act:
-            rut_d = c['RUT_billing'] if c['RUT_billing'] != 'NO ENCONTRADO' else ''
-            data = [c['razon_social'],'Compañía','',c['domicilio'],c['comuna'],c['region'],
-                    'Spanish / Español','Chile','RUT',rut_d,'IVA afecto 1ª categoría',
-                    c['giro'],c['email'],c['email'],c['id_cuenta'],'Anser Indicus SPA',
-                    f"https://dash.fu.do/accounts/{c['id_cuenta']}"]
-            for col_idx, val in enumerate(data, 1):
-                cell = ws.cell(row=next_row, column=col_idx, value=val)
-                cell.font = Font(name='Arial', size=10); cell.fill = orange_fill
-                cell.alignment = Alignment(vertical='center')
-            com_act = str(c['comuna'] or '').strip()
-            if len(com_act) > 20:
-                cv2 = ws.cell(row=next_row, column=19, value='SUPERA LÍMITE SII')
-                cv2.fill = PatternFill('solid', start_color='FF0000')
-                cv2.font = Font(name='Arial', size=9, color='FFFFFF', bold=True)
-                cv2.alignment = Alignment(horizontal='center', vertical='center')
-                ws.cell(row=next_row, column=5).fill = field_red
-            else:
-                cv2 = ws.cell(row=next_row, column=19, value='OK')
-                cv2.fill = green_fill
-                cv2.font = Font(name='Arial', size=9, color='375623')
-                cv2.alignment = Alignment(horizontal='center', vertical='center')
-            next_row += 1
 
     # RUT existe otro ID
     if casos_rut_otro:
@@ -1070,6 +1082,117 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
                     cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
                     cell.alignment = Alignment(vertical='center', wrap_text=True)
                 fila_dc += 1; primera = False
+
+    output = io.BytesIO()
+    wb.save(output); output.seek(0)
+    return output
+
+# ─── Generación Excel de Actualizaciones (Output 2) ──────────────────────────
+def generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs):
+    """
+    Genera el archivo de importación para ACTUALIZAR contactos existentes en Odoo.
+    - casos_act      → fila de baja (_old, Activo=FALSE) + el nuevo contacto va en el crear
+    - casos_actualizar → fila de actualización (contacto sin RUT → agregar datos, Activo=TRUE)
+    - casos_dc       → fila de actualización de datos que difieren del billing (Activo=TRUE)
+    """
+    ref_to_extra = refs.get('ref_to_extra', {})
+
+    headers = ['External ID', 'Referencia', 'Nombre', 'NIF',
+               'Tipo de identificación', 'Correo electrónico', 'País',
+               'Enlace a página web', 'Activo',
+               'Grupo (no importar)', 'Comentario (no importar)']
+    widths  = [38, 12, 35, 18, 22, 35, 10, 45, 8, 25, 45]
+
+    wb  = Workbook()
+    ws  = wb.active
+    ws.title = 'Actualizar contactos existentes'
+    aplicar_header(ws, headers, widths)
+
+    baja_fill    = PatternFill('solid', fgColor='FFD7D7')   # rojo suave
+    update_fill  = PatternFill('solid', fgColor='D7F0D7')   # verde suave
+    dc_fill      = PatternFill('solid', fgColor='FFF2CC')   # amarillo
+
+    fila = 2
+
+    def _escribir_fila(ws, fila, data, fill):
+        for col_idx, val in enumerate(data, 1):
+            cell = ws.cell(row=fila, column=col_idx, value=val)
+            cell.font      = Font(name='Arial', size=10)
+            cell.fill      = fill
+            cell.alignment = Alignment(vertical='center', wrap_text=True)
+        ws.row_dimensions[fila].height = 20
+
+    # ── casos_act: fila de baja (_old) usando datos de Odoo ─────────────────
+    for c in casos_act:
+        id_c  = c['id_cuenta']
+        ex    = ref_to_extra.get(id_c, {})
+        data  = [
+            ex.get('external_id', ''),
+            f"{id_c}_old",
+            ex.get('nombre', c['nombre_cuenta']),
+            ex.get('nif_raw', c['RUT_odoo']),
+            ex.get('tipo_id', 'VAT'),
+            ex.get('email', ''),
+            'Chile',
+            f"https://dash.fu.do/accounts/{id_c}_old",
+            'FALSE',
+            'Baja',
+            f"RUT cambió de {c['RUT_odoo']} a {c['RUT_billing']}",
+        ]
+        _escribir_fila(ws, fila, data, baja_fill)
+        fila += 1
+
+    # ── casos_actualizar: contacto existía sin RUT → actualizar con billing ──
+    for c in casos_actualizar:
+        id_c  = c['id_cuenta']
+        ex    = ref_to_extra.get(id_c, {})
+        data  = [
+            ex.get('external_id', ''),
+            id_c,
+            c['razon_social'],
+            c['RUT_billing'],
+            inferir_tipo_id(c['RUT_billing']),
+            c['email'],
+            'Chile',
+            f"https://dash.fu.do/accounts/{id_c}",
+            'TRUE',
+            'Actualizar — NIF vacío',
+            '',
+        ]
+        _escribir_fila(ws, fila, data, update_fill)
+        fila += 1
+
+    # ── casos_dc: datos que difieren entre billing y Odoo ───────────────────
+    labels_campo = {'razon_social': 'Razón Social', 'giro': 'Giro',
+                    'domicilio': 'Domicilio', 'comuna': 'Comuna'}
+    for c in casos_dc:
+        id_c  = c['id_cuenta']
+        ex    = ref_to_extra.get(id_c, {})
+        diffs = c.get('diffs', {})
+        nombre_nuevo = diffs.get('razon_social', {}).get('billing', ex.get('nombre', c['nombre_cuenta']))
+        email_nuevo  = c.get('email', ex.get('email', ''))
+        comentario   = ' | '.join(
+            f"{labels_campo.get(k, k)}: '{v['billing']}'" for k, v in diffs.items()
+        )
+        data  = [
+            ex.get('external_id', ''),
+            id_c,
+            nombre_nuevo,
+            ex.get('nif_raw', c['RUT']),
+            ex.get('tipo_id', 'VAT'),
+            email_nuevo,
+            'Chile',
+            f"https://dash.fu.do/accounts/{id_c}",
+            'TRUE',
+            'Actualizar datos',
+            comentario,
+        ]
+        _escribir_fila(ws, fila, data, dc_fill)
+        fila += 1
+
+    if fila == 2:
+        ws.cell(row=2, column=1, value='Sin actualizaciones pendientes').font = Font(
+            name='Arial', size=10, italic=True)
 
     output = io.BytesIO()
     wb.save(output); output.seek(0)
@@ -1185,18 +1308,40 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
     df_nd_t    = df_work[df_work['sin_datos']]  if not df_work.empty else pd.DataFrame()
     total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
     bloque(4, 'TOTAL COMPLETO (con IVA)', total_term + total_com, total_fill)
+
+    # ── Desglose Factura / Boleta ──────────────────────────────────────────────
+    boleta_fill  = PatternFill('solid', fgColor='FFF2CC')   # amarillo suave
+    factura_fill = PatternFill('solid', fgColor='DDEEFF')   # azul suave
+
+    df_fact_t = df_ok_t[~df_ok_t['es_consumidor_final']] if not df_ok_t.empty else pd.DataFrame()
+    df_bole_t = df_ok_t[df_ok_t['es_consumidor_final']]  if not df_ok_t.empty else pd.DataFrame()
+    com_ok    = [r for r in rows_comision if not r['sin_datos']]
+    com_fact  = [r for r in com_ok if not r.get('es_consumidor_final', False)]
+    com_bole  = [r for r in com_ok if r.get('es_consumidor_final', False)]
+
+    total_fact = calc_total_df(df_fact_t) + round(sum(r['monto_real'] for r in com_fact))
+    total_bole = calc_total_df(df_bole_t) + round(sum(r['monto_real'] for r in com_bole))
+    n_fact     = df_fact_t['operation_id'].nunique() + len(com_fact) if not df_fact_t.empty else len(com_fact)
+    n_bole     = df_bole_t['operation_id'].nunique() + len(com_bole) if not df_bole_t.empty else len(com_bole)
+
+    if total_fact or total_bole:
+        bloque(5, 'Facturas Electrónicas', total_fact, factura_fill, f'→ {n_fact} factura(s)' if n_fact else '')
+        bloque(6, 'Boletas Electrónicas',  total_bole, boleta_fill,  f'→ {n_bole} boleta(s)'  if n_bole else '')
+        next_row = 7
+    else:
+        next_row = 5
+
     if not df_work.empty:
-        bloque(6, 'Terminales — listas para importar', calc_total_df(df_ok_t), green_fill,
+        bloque(next_row,   'Terminales — listas para importar', calc_total_df(df_ok_t), green_fill,
                f'→ {df_ok_t["operation_id"].nunique()} facturas' if not df_ok_t.empty else '')
-        bloque(7, 'Terminales — sin datos', calc_total_df(df_nd_t), red_fill,
+        bloque(next_row+1, 'Terminales — sin datos', calc_total_df(df_nd_t), red_fill,
                f'→ {df_nd_t["operation_id"].nunique()} facturas' if not df_nd_t.empty else '')
     if rows_comision:
-        com_ok = [r for r in rows_comision if not r['sin_datos']]
         com_nd = [r for r in rows_comision if r['sin_datos']]
-        bloque(8, 'Comisiones — listas para importar',
+        bloque(next_row+2, 'Comisiones — listas para importar',
                round(sum(r['monto_real'] for r in com_ok)), blue_fill, f'→ {len(com_ok)} factura(s)')
         if com_nd:
-            bloque(9, 'Comisiones — sin datos (billing)',
+            bloque(next_row+3, 'Comisiones — sin datos (billing)',
                    round(sum(r['monto_real'] for r in com_nd)), red_fill, f'→ {len(com_nd)} factura(s)')
 
     # ── Cuentas sin datos ──────────────────────────────────────────────────────
@@ -1783,12 +1928,13 @@ def main():
             return
 
         with st.spinner("Clasificando contactos..."):
-            casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro = clasificar_contactos(
+            casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar = clasificar_contactos(
                 df_work, df_comision, refs, rl
             )
 
         hay_contactos_nuevos   = len(casos_crear) > 0
-        hay_acciones_contactos = hay_contactos_nuevos or len(casos_act) > 0 or len(casos_dc) > 0
+        hay_actualizaciones    = len(casos_act) > 0 or len(casos_actualizar) > 0 or len(casos_dc) > 0
+        hay_acciones_contactos = hay_contactos_nuevos or hay_actualizaciones
 
         # ── Métricas ──────────────────────────────────────────────
         st.divider()
@@ -1804,9 +1950,11 @@ def main():
 
         # Alertas generales
         if casos_act:
-            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — ver hoja '⚠ Contactos a actualizar'.")
+            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — se archivan con _old y se crea contacto nuevo.")
+        if casos_actualizar:
+            st.info(f"ℹ️ **{len(casos_actualizar)} contacto(s)** sin RUT en Odoo — se actualizan con datos de billing.")
         if casos_dc:
-            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos actualizados en billing — ver hoja '⚠ Datos actualizados'.")
+            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos distintos en billing — ver archivo de actualizaciones.")
         if alertas_op:
             st.warning(f"⚠️ **{len(alertas_op)} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
         if alertas_fmt:
@@ -1821,25 +1969,44 @@ def main():
         st.subheader("📥 Descargar archivos")
         dl_col1, dl_col2 = st.columns(2)
 
-        # Archivo de contactos (siempre que haya algo que reportar)
-        if hay_acciones_contactos:
-            with st.spinner("Generando contactos.xlsx..."):
+        # Archivo de contactos nuevos (crear)
+        if hay_contactos_nuevos:
+            with st.spinner("Generando contactos_nuevos.xlsx..."):
                 excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
-            nombre_cont = f"contactos_{date.today().strftime('%Y%m%d')}.xlsx"
+            nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
             with dl_col1:
-                if hay_contactos_nuevos:
-                    st.warning(f"⚠️ {len(casos_crear)} contacto(s) nuevo(s) — importalos en Odoo")
+                st.warning(f"⚠️ {len(casos_crear)} contacto(s) nuevo(s) — importalos en Odoo")
                 st.download_button(
                     label=f"📋 {nombre_cont}",
                     data=excel_cont,
                     file_name=nombre_cont,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    help="Importar en Odoo antes de facturar"
+                    help="Importar en Odoo → Contactos → Importar registros"
                 )
-        else:
+        elif not hay_actualizaciones:
             with dl_col1:
                 st.success("✅ Todos los contactos ya están en Odoo")
+
+        # Archivo de actualizaciones (Output 2)
+        if hay_actualizaciones:
+            with st.spinner("Generando contactos_actualizar.xlsx..."):
+                excel_act = generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs)
+            nombre_act = f"contactos_actualizar_{date.today().strftime('%Y%m%d')}.xlsx"
+            with dl_col2:
+                partes = []
+                if casos_act:        partes.append(f"{len(casos_act)} baja(s) _old")
+                if casos_actualizar: partes.append(f"{len(casos_actualizar)} actualización(es) NIF")
+                if casos_dc:         partes.append(f"{len(casos_dc)} dato(s) distinto(s)")
+                st.warning(f"⚠️ {' | '.join(partes)}")
+                st.download_button(
+                    label=f"🔄 {nombre_act}",
+                    data=excel_act,
+                    file_name=nombre_act,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    help="Importar en Odoo para actualizar contactos existentes"
+                )
 
         # Archivo de facturación / instrucciones
         if es_paso1:
@@ -1877,7 +2044,7 @@ def main():
                     "4. Subí ese nuevo export en el campo **Contactos Odoo** (arriba)\n"
                     "5. Hacé clic en **Procesar** de nuevo"
                 )
-        elif df_work.empty and not rows_comision:
+        elif df_work.empty and not rows_comision and not csc:
             with dl_col2:
                 st.info("No hay filas para facturar en este collection.")
         else:
