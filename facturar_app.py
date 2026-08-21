@@ -844,6 +844,201 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         'comisiones_sin_cuenta': comisiones_sin_cuenta,
     }
 
+# ─── Hardware ─────────────────────────────────────────────────────────────────
+HW_PRODUCT_MAP = {
+    'imin falcon 1':                          'POS iMin Falcon 1',
+    'falcon 1':                               'POS iMin Falcon 1',
+    'barpos t8300':                           'BT8300',
+    'd1w':                                    'D1W',
+    'd1w + lic. windows':                     'D1W',
+    'd1a (all in one con impresora integrada)':'D1A',
+    'd1a':                                    'D1A',
+    'slk-ts200':                              'TS200',
+    'ts200':                                  'TS200',
+    'gaveta dinero pequeña horpos hs-330':    'Horpos HS-330',
+    'horpos hs-330':                          'Horpos HS-330',
+    'gaveta dinero barpos tc-415':            'TC-415',
+    'tc-415':                                 'TC-415',
+    'pos-rpt004':                             'POS-RPT004',
+    '3nstar pos-rpt004':                      'POS-RPT004',
+    'pos-rpt006w':                            'POS-RPT006W',
+    '3nstar pos-rpt006w':                     'POS-RPT006W',
+}
+CTA_HW = '310115 Ventas de Productos'
+
+def mapear_producto_hw(nombre: str):
+    if not nombre:
+        return None
+    return HW_PRODUCT_MAP.get(str(nombre).strip().lower())
+
+@st.cache_data
+def leer_sheet_hw(f_bytes: bytes) -> tuple[list[dict], dict]:
+    """Lee hoja 'Ventas (NEW)' y devuelve (filas sin facturar, precios netos)."""
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(f_bytes))
+    ws = wb['Ventas (NEW)']
+    # Precios desde Lista de precios (col B = modelo, col I = precio_aju con IVA)
+    precios_netos = {}
+    try:
+        wsp = wb['Lista de precios']
+        for r in range(4, wsp.max_row + 1):
+            modelo = wsp.cell(row=r, column=2).value
+            precio_aju = wsp.cell(row=r, column=9).value
+            if modelo and isinstance(precio_aju, (int, float)) and precio_aju:
+                precios_netos[str(modelo).strip().lower()] = round(float(precio_aju) / 1.19, 2)
+    except Exception:
+        pass
+    # Columnas (1-indexed): A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,I=9,J=10,L=12,M=13,
+    # P=16,Y=25,Z=26,AA=27,AB=28,AC=29,AD=30,AE=31,AF=32,AH=34,AI=35,AK=37
+    filas = []
+    for r in range(5, ws.max_row + 1):
+        pedido = ws.cell(row=r, column=1).value
+        if not pedido:
+            continue
+        fc_nro = ws.cell(row=r, column=32).value
+        if fc_nro and str(fc_nro).strip():
+            continue  # ya facturado
+        art1 = ws.cell(row=r, column=3).value
+        if not art1:
+            continue
+        cell_cta = ws.cell(row=r, column=13)
+        fudo_id = ''
+        if cell_cta.hyperlink and cell_cta.hyperlink.target:
+            fudo_id = cell_cta.hyperlink.target.rstrip('/').split('/')[-1]
+        art2 = ws.cell(row=r, column=5).value
+        art3 = ws.cell(row=r, column=7).value
+        filas.append({
+            'pedido':       int(pedido),
+            'fecha':        ws.cell(row=r, column=2).value,
+            'art1':         str(art1).strip(),
+            'qty1':         int(ws.cell(row=r, column=4).value or 1),
+            'art2':         str(art2).strip() if art2 else None,
+            'qty2':         int(ws.cell(row=r, column=6).value or 1) if art2 else 0,
+            'art3':         str(art3).strip() if art3 else None,
+            'qty3':         int(ws.cell(row=r, column=8).value or 1) if art3 else 0,
+            'pago_envio':   bool(ws.cell(row=r, column=9).value),
+            'estado':       str(ws.cell(row=r, column=10).value or ''),
+            'cliente':      str(ws.cell(row=r, column=12).value or '').strip(),
+            'cuenta_fudo':  str(cell_cta.value or '').strip(),
+            'fudo_id':      fudo_id,
+            'mail':         str(ws.cell(row=r, column=16).value or '').strip().lower(),
+            'rut':          str(ws.cell(row=r, column=25).value or '').strip(),
+            'razon_social': str(ws.cell(row=r, column=26).value or '').strip(),
+            'direccion':    str(ws.cell(row=r, column=27).value or '').strip(),
+            'ciudad':       str(ws.cell(row=r, column=28).value or '').strip(),
+            'region':       str(ws.cell(row=r, column=29).value or '').strip(),
+            'giro':         str(ws.cell(row=r, column=30).value or '').strip(),
+            'email':        str(ws.cell(row=r, column=31).value or '').strip().lower(),
+            'pago_envio_monto': float(ws.cell(row=r, column=35).value or 0),
+            'total':        float(ws.cell(row=r, column=37).value or 0),
+        })
+    return filas, precios_netos
+
+@st.cache_data
+def leer_collection_hw(f_bytes: bytes) -> list[dict]:
+    """Filtra el collection por 'Compra hardwarefudochile'."""
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(f_bytes), data_only=True)
+    ws = wb.active
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+    def col(kw):
+        for i, h in enumerate(headers):
+            if h and kw.lower() in str(h).lower():
+                return i + 1
+        return 1
+    c_reason = col('reason'); c_opid = col('operation_id')
+    c_amount = col('transaction_amount'); c_email = col('counterpart_email')
+    entries = []
+    for r in range(2, ws.max_row + 1):
+        reason = str(ws.cell(row=r, column=c_reason).value or '').lower()
+        if 'hardwarefudochile' not in reason:
+            continue
+        entries.append({
+            'operation_id': str(ws.cell(row=r, column=c_opid).value or '').strip().replace("'", ''),
+            'amount':       float(ws.cell(row=r, column=c_amount).value or 0),
+            'email':        str(ws.cell(row=r, column=c_email).value or '').strip().lower(),
+        })
+    return entries
+
+def match_hw(row: dict, coll: list[dict]) -> dict | None:
+    email = (row['mail'] or row['email']).lower()
+    total = row['total']
+    for e in coll:
+        if e['email'] == email and abs(e['amount'] - total) < 2:
+            return e
+    for e in coll:
+        if abs(e['amount'] - total) < 2:
+            return e
+    return None
+
+def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
+    wb  = Workbook(); ws = wb.active; ws.title = 'Factura Hardware'
+    hdrs = ['Tipo de Documento (Factura)','Número de Documento','Empresa',
+            'RUT del Cliente (COO)','Referencia de Pago','Fecha de Factura',
+            'Fecha de Vencimiento','Cuenta','Referencia','Origen (SO)',
+            'Operación MP','Términos de Pago','Tipo Doc','Tipo de Documento DTE',
+            'Producto','Plan Contable','Cantidad','Precio Unitario',
+            'Impuesto ventas','Descuento %']
+    aplicar_header(ws, hdrs, [18,16,20,16,18,14,14,14,38,10,18,12,18,22,22,22,10,16,14,10])
+    ri = 2; fecha_hoy = date.today().strftime('%d/%m/%Y')
+    for d in rows_data:
+        ref = f"Hardware {d['pedido']} - {d['cuenta_fudo']}"
+        articulos = [(d['odoo_art1'], d['qty1'], d['precio_neto1'])]
+        if d.get('art2') and d.get('odoo_art2'):
+            articulos.append((d['odoo_art2'], d['qty2'], d['precio_neto2']))
+        if d.get('art3') and d.get('odoo_art3'):
+            articulos.append((d['odoo_art3'], d['qty3'], d['precio_neto3']))
+        for i, (prod, qty, precio) in enumerate(articulos):
+            if i == 0:
+                fila = ['Factura de cliente', '', 'Anser Indicus SPA',
+                        d['rut'], f"'{d['operation_id']}",
+                        fecha_hoy, fecha_hoy, d['fudo_id'] or d['razon_social'],
+                        ref, '', f"'{d['operation_id']}", 'Inmediato',
+                        'Factura Electrónica', '(33) Factura Electrónica',
+                        prod, CTA_HW, qty, precio, 'IVA 19 Venta', 0]
+            else:
+                fila = ['','','','','','','','','','','','','','',
+                        prod, CTA_HW, qty, precio, 'IVA 19 Venta', 0]
+            sin_opid = not d.get('operation_id')
+            for ci, val in enumerate(fila, 1):
+                cell = ws.cell(row=ri, column=ci, value=val)
+                cell.font = Font(name='Arial', size=10)
+                cell.alignment = Alignment(vertical='center')
+                if sin_opid:
+                    cell.fill = red_fill
+            ri += 1
+        if d.get('pago_envio') and d.get('precio_envio_neto'):
+            fila_env = ['','','','','','','','','','','','','','',
+                        'LW', CTA_HW, 1, d['precio_envio_neto'], 'IVA 19 Venta', 0]
+            for ci, val in enumerate(fila_env, 1):
+                cell = ws.cell(row=ri, column=ci, value=val)
+                cell.font = Font(name='Arial', size=10)
+                cell.alignment = Alignment(vertical='center')
+            ri += 1
+    output = io.BytesIO(); wb.save(output); output.seek(0)
+    return output.getvalue()
+
+def generar_excel_contacto_hw(filas: list[dict], rl: dict) -> bytes:
+    hdrs = ['Nombre','Tipo de compañía','Empresa relacionada','Nombre de la calle',
+            'Ciudad','Provincia','Idioma','País','Tipo de identificación','NIF',
+            'Tipo de contribuyente','Giro','Correo DTE','Correo electrónico',
+            'Referencia','Compañía','Enlace a página web']
+    wb = Workbook(); ws = wb.active; ws.title = 'Contactos Hardware'
+    aplicar_header(ws, hdrs, [40,15,20,35,20,25,18,10,20,15,25,30,35,35,15,20,40])
+    for i, c in enumerate(filas, 2):
+        region = buscar_region(c['ciudad'], rl) or c.get('region', '')
+        data = [c['razon_social'], 'Compañía', '', c['direccion'], c['ciudad'],
+                region, 'Spanish / Español', 'Chile', 'RUT', c['rut'],
+                'IVA afecto 1ª categoría', c['giro'], c['email'], c['email'],
+                c['fudo_id'], 'Anser Indicus SPA',
+                f"https://dash.fu.do/accounts/{c['fudo_id']}"]
+        for ci, val in enumerate(data, 1):
+            cell = ws.cell(row=i, column=ci, value=val)
+            cell.font = Font(name='Arial', size=10)
+            cell.alignment = Alignment(vertical='center')
+    output = io.BytesIO(); wb.save(output); output.seek(0)
+    return output.getvalue()
+
 # ─── Clasificación de contactos ───────────────────────────────────────────────
 def clasificar_contactos(df_work, df_comision, refs, rl):
     ref_to_dbid      = refs['ref_to_dbid']
@@ -1717,12 +1912,14 @@ def main():
             "📋  PASO 1 — Crear contactos",
             "🧾  PASO 2 — Facturar",
             "🔍  PASO 3 — Auditoría",
+            "🖥️  Hardware",
         ], label_visibility="collapsed")
 
         es_paso1 = "PASO 1" in paso
+        es_hw    = "Hardware" in paso
 
-        tipo_fact = "Terminales + Deuda fija"  # default (para PASO 1 procesar todo)
-        if not es_paso1:
+        tipo_fact = "Terminales + Deuda fija"  # default
+        if not es_paso1 and not es_hw:
             st.markdown("**¿Qué querés facturar?**")
             tipo_fact = st.selectbox("", [
                 "Terminales",
@@ -2204,6 +2401,155 @@ def main():
                 use_container_width=True,
                 type="primary",
             )
+
+    # ══════════════════════════════════════════════════════════
+    # Hardware — Facturación de ventas de hardware
+    # ══════════════════════════════════════════════════════════
+    if "Hardware" in paso:
+        st.markdown("""
+        <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                    padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+            <div style="width:40px; height:40px; background:#3938A0; border-radius:10px;
+                        display:flex; align-items:center; justify-content:center;
+                        font-size:20px; flex-shrink:0;">🖥️</div>
+            <div>
+                <div style="font-family:'Barlow',sans-serif; font-size:20px; font-weight:700;
+                            color:#3938A0; letter-spacing:-0.3px; line-height:1.2;">
+                    Facturación Hardware
+                </div>
+                <div style="font-family:'Barlow',sans-serif; font-size:12px; color:#9090B8; margin-top:2px;">
+                    Genera el contacto y la factura para ventas de hardware
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col_hw1, col_hw2 = st.columns(2)
+        with col_hw1:
+            f_hw_sheet = st.file_uploader(
+                "Sheet HW *(requerido)*", type=['xlsx'],
+                help="Ventas Tienda FUDO HW (Ch).xlsx")
+            f_hw_col = st.file_uploader(
+                "Collection Mercado Pago *(requerido)*", type=['xlsx', 'csv'],
+                help="collection-FECHA.xlsx de Mercado Pago")
+        with col_hw2:
+            f_hw_con = st.file_uploader(
+                "Contactos Odoo *(para verificar RUT)*", type=['xlsx'],
+                help="Exportación res.partner de Odoo")
+
+        if st.button("🚀 Procesar Hardware", type='primary', use_container_width=True):
+            if not f_hw_sheet or not f_hw_col:
+                st.error("⛔ Necesitás subir el Sheet HW y el Collection MP.")
+                return
+
+            with st.spinner("Leyendo archivos..."):
+                filas_hw, precios = leer_sheet_hw(f_hw_sheet.getvalue())
+                coll_hw           = leer_collection_hw(f_hw_col.getvalue())
+
+            if not filas_hw:
+                st.success("✅ No hay ventas sin facturar en el Sheet.")
+                return
+
+            # Contactos Odoo para chequeo de RUT
+            nif_to_ref_hw = {}
+            if f_hw_con:
+                refs_hw = leer_contactos(f_hw_con)
+                nif_to_ref_hw = refs_hw.get('nif_to_ref', {})
+
+            rows_data, contactos_nuevos, avisos = [], [], []
+
+            for row in filas_hw:
+                col_match = match_hw(row, coll_hw)
+                if not col_match:
+                    avisos.append(
+                        f"⚠️ Pedido **#{row['pedido']}** ({row['cuenta_fudo']}): "
+                        f"no se encontró en el collection (email: {row['mail'] or row['email']}, "
+                        f"total: ${row['total']:,.0f})"
+                    )
+
+                # Mapeo de productos
+                odoo1 = mapear_producto_hw(row['art1'])
+                odoo2 = mapear_producto_hw(row['art2']) if row.get('art2') else None
+                odoo3 = mapear_producto_hw(row['art3']) if row.get('art3') else None
+                if not odoo1:
+                    avisos.append(f"⚠️ Pedido **#{row['pedido']}**: producto '{row['art1']}' no tiene mapeo en Odoo.")
+
+                # Precios netos por artículo
+                def _pneto(nombre, qty):
+                    if not nombre or not qty:
+                        return 0.0
+                    k = nombre.strip().lower()
+                    if k in precios:
+                        return precios[k]
+                    return round(row['total'] / row['qty1'] / 1.19, 2)
+
+                precio1 = _pneto(row['art1'], row['qty1'])
+                precio2 = _pneto(row['art2'], row['qty2']) if row.get('art2') else 0.0
+                precio3 = _pneto(row['art3'], row['qty3']) if row.get('art3') else 0.0
+                precio_env_neto = round(11900 / 1.19, 2) if row['pago_envio'] else 0.0
+
+                # Chequeo de RUT
+                rut_clean = limpiar_rut(row['rut'])
+                if rut_clean and rut_clean not in nif_to_ref_hw:
+                    contactos_nuevos.append(row)
+
+                rows_data.append({
+                    **row,
+                    'operation_id':      col_match['operation_id'] if col_match else '',
+                    'odoo_art1':         odoo1 or row['art1'],
+                    'odoo_art2':         odoo2,
+                    'odoo_art3':         odoo3,
+                    'precio_neto1':      precio1,
+                    'precio_neto2':      precio2,
+                    'precio_neto3':      precio3,
+                    'precio_envio_neto': precio_env_neto,
+                })
+
+            # ── Resultado ────────────────────────────────────────
+            st.divider()
+            st.subheader("📊 Resultado")
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Ventas sin facturar", len(filas_hw))
+            mc2.metric("Contactos nuevos en Odoo", len(contactos_nuevos))
+            mc3.metric("Encontrados en collection", len([r for r in rows_data if r['operation_id']]))
+
+            for a in avisos:
+                st.warning(a)
+
+            # ── Descargas ────────────────────────────────────────
+            st.divider()
+            st.subheader("📥 Descargar archivos")
+            dl1, dl2 = st.columns(2)
+
+            if contactos_nuevos:
+                excel_cto  = generar_excel_contacto_hw(contactos_nuevos, rl)
+                nombre_cto = f"contactos_hw_{date.today().strftime('%Y%m%d')}.xlsx"
+                with dl1:
+                    st.warning(f"⚠️ {len(contactos_nuevos)} contacto(s) nuevo(s) — importar en Odoo antes de facturar")
+                    st.download_button(
+                        label=f"📋 {nombre_cto}",
+                        data=excel_cto, file_name=nombre_cto,
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        use_container_width=True
+                    )
+            else:
+                with dl1:
+                    st.success("✅ Todos los RUTs ya están en Odoo")
+
+            excel_fact  = generar_excel_factura_hw(rows_data)
+            nombre_fact = f"factura_hw_{date.today().strftime('%Y%m%d')}.xlsx"
+            with dl2:
+                st.download_button(
+                    label=f"🧾 {nombre_fact}",
+                    data=excel_fact, file_name=nombre_fact,
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    type='primary'
+                )
+        return  # no ejecutar PASO 1/2/3 — dentro del if es_hw
+
+    # fin bloque Hardware
+
 
 if __name__ == '__main__':
     main()
