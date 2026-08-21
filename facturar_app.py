@@ -871,6 +871,26 @@ def mapear_producto_hw(nombre: str):
         return None
     return HW_PRODUCT_MAP.get(str(nombre).strip().lower())
 
+def _parse_num(v) -> float:
+    """Convierte un valor de celda a float, manejando strings con $, puntos de miles, etc."""
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace('$', '').replace('\xa0', '').replace(' ', '')
+    # Chile usa punto como separador de miles y coma como decimal
+    # Si hay coma y punto: 1.234,56 → float
+    if ',' in s and '.' in s:
+        s = s.replace('.', '').replace(',', '.')
+    elif ',' in s:
+        s = s.replace(',', '.')
+    else:
+        s = s.replace('.', '') if s.count('.') > 1 else s
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
 @st.cache_data
 def leer_sheet_hw(f_bytes: bytes) -> tuple[list[dict], dict]:
     """Lee hoja 'Ventas (NEW)' y devuelve (filas sin facturar, precios netos)."""
@@ -929,8 +949,8 @@ def leer_sheet_hw(f_bytes: bytes) -> tuple[list[dict], dict]:
             'region':       str(ws.cell(row=r, column=29).value or '').strip(),
             'giro':         str(ws.cell(row=r, column=30).value or '').strip(),
             'email':        str(ws.cell(row=r, column=31).value or '').strip().lower(),
-            'pago_envio_monto': float(ws.cell(row=r, column=35).value or 0),
-            'total':        float(ws.cell(row=r, column=37).value or 0),
+            'pago_envio_monto': _parse_num(ws.cell(row=r, column=35).value),
+            'total':        _parse_num(ws.cell(row=r, column=37).value),
         })
     return filas, precios_netos
 
@@ -955,7 +975,7 @@ def leer_collection_hw(f_bytes: bytes) -> list[dict]:
             continue
         entries.append({
             'operation_id': str(ws.cell(row=r, column=c_opid).value or '').strip().replace("'", ''),
-            'amount':       float(ws.cell(row=r, column=c_amount).value or 0),
+            'amount':       _parse_num(ws.cell(row=r, column=c_amount).value),
             'email':        str(ws.cell(row=r, column=c_email).value or '').strip().lower(),
         })
     return entries
