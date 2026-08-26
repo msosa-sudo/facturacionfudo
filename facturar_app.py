@@ -1123,7 +1123,8 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                         'giro': row['giro'], 'domicilio': row['domicilio'],
                         'comuna': row['comuna'], 'email': row['email'],
                         'region': buscar_region(row['comuna'], rl),
-                        'rut_ya_existe': False
+                        'rut_ya_existe': False,
+                        'es_reemplazo': True,  # contacto ya existe en Odoo con otra ref
                     })
         elif rut_en_odoo:
             rut_clean  = limpiar_rut(rut_billing)
@@ -1141,15 +1142,18 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                 'comuna': row['comuna'], 'email': row['email'],
                 'region': buscar_region(row['comuna'], rl),
                 'rut_ya_existe': True,
-                'ref_existente': ref_exist, 'db_id_existente': dbid_exist
+                'ref_existente': ref_exist, 'db_id_existente': dbid_exist,
+                'es_reemplazo': True,  # RUT ya existe en Odoo con otra referencia
             })
         else:
+            # Contacto completamente ausente de Odoo → bloquea facturación en PASO 2
             casos_crear.append({
                 'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
                 'RUT': rut_billing, 'razon_social': row['razon_social'],
                 'giro': row['giro'], 'domicilio': row['domicilio'],
                 'comuna': row['comuna'], 'email': row['email'],
-                'region': buscar_region(row['comuna'], rl)
+                'region': buscar_region(row['comuna'], rl),
+                'es_reemplazo': False,
             })
 
     return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar
@@ -2149,7 +2153,10 @@ def main():
                 df_work, df_comision, refs, rl
             )
 
-        hay_contactos_nuevos   = len(casos_crear) > 0
+        # Solo bloquea facturación si hay contactos completamente ausentes de Odoo.
+        # casos_crear con es_reemplazo=True ya existen en Odoo (distinto RUT/ref) → solo advertencia.
+        casos_crear_bloqueantes = [c for c in casos_crear if not c.get('es_reemplazo', False)]
+        hay_contactos_nuevos   = len(casos_crear_bloqueantes) > 0
         hay_actualizaciones    = len(casos_act) > 0 or len(casos_actualizar) > 0 or len(casos_dc) > 0
         hay_acciones_contactos = hay_contactos_nuevos or hay_actualizaciones
 
@@ -2240,14 +2247,14 @@ def main():
                 # Mensaje claro explicando por qué no se generó la facturación
                 faltantes_lista = "\n".join(
                     f"- **{c['nombre_cuenta']}** (ID: {c['id_cuenta']})"
-                    for c in casos_crear[:10]
+                    for c in casos_crear_bloqueantes[:10]
                 )
-                if len(casos_crear) > 10:
-                    faltantes_lista += f"\n- ... y {len(casos_crear)-10} más"
+                if len(casos_crear_bloqueantes) > 10:
+                    faltantes_lista += f"\n- ... y {len(casos_crear_bloqueantes)-10} más"
                 st.error(
                     f"⛔ **No se generó el archivo de facturación.**\n\n"
                     f"El archivo de contactos de Odoo que subiste "
-                    f"(**{f_con.name}**) no incluye {len(casos_crear)} cuenta(s) "
+                    f"(**{f_con.name}**) no incluye {len(casos_crear_bloqueantes)} cuenta(s) "
                     f"que aparecen en el collection. "
                     f"Esto ocurre cuando subiste un res.partner anterior a la importación "
                     f"de los contactos nuevos.\n\n"
