@@ -985,27 +985,46 @@ def leer_collection_hw(f_bytes: bytes) -> list[dict]:
         return 1
     c_reason = col('reason'); c_opid = col('operation_id')
     c_amount = col('transaction_amount'); c_email = col('counterpart_email')
+    c_codigo = col('código') or col('codigo') or col('external_reference')
     entries = []
     for r in range(2, ws.max_row + 1):
         reason = str(ws.cell(row=r, column=c_reason).value or '').lower()
         if 'hardwarefudochile' not in reason:
             continue
+        codigo = str(ws.cell(row=r, column=c_codigo).value or '').strip()
         entries.append({
             'operation_id': str(ws.cell(row=r, column=c_opid).value or '').strip().replace("'", ''),
             'amount':       _parse_num(ws.cell(row=r, column=c_amount).value),
             'email':        str(ws.cell(row=r, column=c_email).value or '').strip().lower(),
+            'codigo':       codigo,  # e.g. "FUDO-257"
         })
     return entries
 
 def match_hw(row: dict, coll: list[dict]) -> dict | None:
     email = (row['mail'] or row['email']).lower()
     total = row['total']
-    for e in coll:
-        if e['email'] == email and abs(e['amount'] - total) < 2:
-            return e
-    for e in coll:
-        if abs(e['amount'] - total) < 2:
-            return e
+    fudo_id = str(row.get('fudo_id', ''))
+
+    # 1. Por fudo_id en el código (más confiable: "FUDO-257" contiene "257")
+    if fudo_id:
+        for e in coll:
+            if fudo_id in e.get('codigo', ''):
+                return e
+    # 2. Email + monto
+    if total:
+        for e in coll:
+            if e['email'] == email and abs(e['amount'] - total) < 2:
+                return e
+    # 3. Solo monto
+    if total:
+        for e in coll:
+            if abs(e['amount'] - total) < 2:
+                return e
+    # 4. Email solo (último recurso)
+    if email:
+        for e in coll:
+            if e['email'] == email:
+                return e
     return None
 
 def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
