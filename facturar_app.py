@@ -992,49 +992,58 @@ def match_hw(row: dict, coll: list[dict]) -> dict | None:
     return None
 
 def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
+    """Genera el Excel de facturación de hardware en el mismo formato que terminales."""
     wb  = Workbook(); ws = wb.active; ws.title = 'Factura Hardware'
-    hdrs = ['Tipo de Documento (Factura)','Número de Documento','Empresa',
-            'RUT del Cliente (COO)','Referencia de Pago','Fecha de Factura',
-            'Fecha de Vencimiento','Cuenta','Referencia','Origen (SO)',
-            'Operación MP','Términos de Pago','Tipo Doc','Tipo de Documento DTE',
-            'Producto','Plan Contable','Cantidad','Precio Unitario',
-            'Impuesto ventas','Descuento %']
-    aplicar_header(ws, hdrs, [18,16,20,16,18,14,14,14,38,10,18,12,18,22,22,22,10,16,14,10])
-    ri = 2; fecha_hoy = date.today().strftime('%d/%m/%Y')
+    hdrs = ['Orden', 'Contacto/Id. de la DB', 'Referencia',
+            'Fecha de Factura/Recibo', 'Fecha vencimiento', 'Referencia de Pago',
+            'Diario', 'Tipo de Documento',
+            'Líneas de factura/Producto', 'Líneas de factura/Cuenta',
+            'Líneas de factura/Cantidad mínima', 'Líneas de factura/Precio unitario',
+            'Líneas de factura/Impuesto', 'Líneas de factura/Descuento (%)']
+    aplicar_header(ws, hdrs, [8, 20, 30, 18, 18, 20, 20, 20, 30, 28, 12, 18, 16, 14])
+    ri = 2
+    fecha_hoy = date.today().strftime('%d/%m/%Y')
     for d in rows_data:
-        ref = f"Hardware {d['pedido']} - {d['cuenta_fudo']}"
+        db_id     = d.get('db_id', '')
+        referencia = str(d['pedido'])
+        op_id     = f"'{d['operation_id']}" if d.get('operation_id') else ''
+        es_cf     = limpiar_rut(d.get('rut', '')) == '111111111'
+        tipo_doc  = 'Boleta Electrónica' if es_cf else 'Factura Electrónica'
+        sin_opid  = not d.get('operation_id')
+        sin_dbid  = not db_id
+
         articulos = [(d['odoo_art1'], d['qty1'], d['precio_neto1'])]
         if d.get('art2') and d.get('odoo_art2'):
             articulos.append((d['odoo_art2'], d['qty2'], d['precio_neto2']))
         if d.get('art3') and d.get('odoo_art3'):
             articulos.append((d['odoo_art3'], d['qty3'], d['precio_neto3']))
+
         for i, (prod, qty, precio) in enumerate(articulos):
             if i == 0:
-                fila = ['Factura de cliente', '', 'Anser Indicus SPA',
-                        d['rut'], f"'{d['operation_id']}",
-                        fecha_hoy, fecha_hoy, d['fudo_id'] or d['razon_social'],
-                        ref, '', f"'{d['operation_id']}", 'Inmediato',
-                        'Factura Electrónica', '(33) Factura Electrónica',
-                        prod, CTA_HW, qty, precio, 'IVA 19 Venta', 0]
+                fila = [None, db_id or '', referencia,
+                        fecha_hoy, fecha_hoy, op_id,
+                        'Factura Electrónica', tipo_doc,
+                        prod, CTA_HW, qty, round(precio, 4), 'IVA 19 Venta', 0]
             else:
-                fila = ['','','','','','','','','','','','','','',
-                        prod, CTA_HW, qty, precio, 'IVA 19 Venta', 0]
-            sin_opid = not d.get('operation_id')
+                fila = [None, None, None, None, None, None, None, None,
+                        prod, CTA_HW, qty, round(precio, 4), 'IVA 19 Venta', 0]
             for ci, val in enumerate(fila, 1):
                 cell = ws.cell(row=ri, column=ci, value=val)
                 cell.font = Font(name='Arial', size=10)
                 cell.alignment = Alignment(vertical='center')
-                if sin_opid:
-                    cell.fill = red_fill
+                if sin_opid: cell.fill = red_fill
+                elif sin_dbid and ci == 2: cell.fill = orange_fill
             ri += 1
+
         if d.get('pago_envio') and d.get('precio_envio_neto'):
-            fila_env = ['','','','','','','','','','','','','','',
-                        'LW', CTA_HW, 1, d['precio_envio_neto'], 'IVA 19 Venta', 0]
+            fila_env = [None, None, None, None, None, None, None, None,
+                        'Logística', CTA_HW, 1, round(d['precio_envio_neto'], 4), 'IVA 19 Venta', 0]
             for ci, val in enumerate(fila_env, 1):
                 cell = ws.cell(row=ri, column=ci, value=val)
                 cell.font = Font(name='Arial', size=10)
                 cell.alignment = Alignment(vertical='center')
             ri += 1
+
     output = io.BytesIO(); wb.save(output); output.seek(0)
     return output.getvalue()
 
@@ -2158,82 +2167,130 @@ def main():
         casos_crear_bloqueantes = [c for c in casos_crear if not c.get('es_reemplazo', False)]
         hay_contactos_nuevos   = len(casos_crear_bloqueantes) > 0
         hay_actualizaciones    = len(casos_act) > 0 or len(casos_actualizar) > 0 or len(casos_dc) > 0
-        hay_acciones_contactos = hay_contactos_nuevos or hay_actualizaciones
 
-        # ── Métricas ──────────────────────────────────────────────
+        total_term = calc_total_df(df_work)
+        total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
+
+        # Generar todos los archivos Excel antes de guardar en session_state
+        _excel_cont, _nombre_cont = None, None
+        if hay_contactos_nuevos:
+            with st.spinner("Generando contactos_nuevos.xlsx..."):
+                _excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
+            _nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
+
+        _excel_act, _nombre_act, _partes_act = None, None, []
+        if hay_actualizaciones:
+            with st.spinner("Generando contactos_actualizar.xlsx..."):
+                _excel_act = generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs)
+            _nombre_act = f"contactos_actualizar_{date.today().strftime('%Y%m%d')}.xlsx"
+            if casos_act:        _partes_act.append(f"{len(casos_act)} baja(s) _old")
+            if casos_actualizar: _partes_act.append(f"{len(casos_actualizar)} actualización(es) NIF")
+            if casos_dc:         _partes_act.append(f"{len(casos_dc)} dato(s) distinto(s)")
+
+        _faltantes_lista, _n_faltantes = '', len(casos_crear_bloqueantes)
+        if hay_contactos_nuevos:
+            _faltantes_lista = "\n".join(
+                f"- **{c['nombre_cuenta']}** (ID: {c['id_cuenta']})"
+                for c in casos_crear_bloqueantes[:10]
+            )
+            if _n_faltantes > 10:
+                _faltantes_lista += f"\n- ... y {_n_faltantes - 10} más"
+
+        _excel_fact, _nombre_fact = None, None
+        _sin_filas = df_work.empty and not rows_comision and not csc
+        if not es_paso1 and not hay_contactos_nuevos and not _sin_filas:
+            empty_cols = ['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id',
+                          'monto','RUT_billing','RUT_odoo','razon_social','nombre_billing',
+                          'giro','domicilio','comuna','email','db_id','contacto_nombre',
+                          'monto_diferente','sin_datos','es_consumidor_final','fecha_compra']
+            with st.spinner("Generando Excel de facturación..."):
+                _excel_fact = generar_excel_facturacion(
+                    df_work if not df_work.empty else pd.DataFrame(columns=empty_cols),
+                    rows_comision if hacer_comisiones else [],
+                    alertas_monto, alertas_op, alertas_fmt,
+                    comisiones_sin_cuenta=csc,
+                )
+            _nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
+
+        # Guardar todo en session_state para que persista al descargar archivos
+        st.session_state['_paso12_state'] = {
+            'paso_actual': paso,
+            # métricas
+            'total_term': total_term, 'total_com': total_com, 'dup_count': dup_count,
+            'n_terminales': df_work['operation_id'].nunique() if not df_work.empty else 0,
+            'n_comision': len(rows_comision),
+            # alertas
+            'n_casos_act': len(casos_act), 'n_casos_actualizar': len(casos_actualizar),
+            'n_casos_dc': len(casos_dc), 'n_alertas_op': len(alertas_op),
+            'n_alertas_fmt': len(alertas_fmt), 'n_csc': len(csc), 'n_alertas_monto': len(alertas_monto),
+            # flags
+            'hay_contactos_nuevos': hay_contactos_nuevos, 'hay_actualizaciones': hay_actualizaciones,
+            'es_paso1': es_paso1, 'sin_filas': _sin_filas,
+            # descargas
+            'excel_cont': _excel_cont, 'nombre_cont': _nombre_cont, 'n_crear': len(casos_crear),
+            'excel_act': _excel_act, 'nombre_act': _nombre_act, 'partes_act': _partes_act,
+            'excel_fact': _excel_fact, 'nombre_fact': _nombre_fact,
+            'faltantes_lista': _faltantes_lista, 'n_faltantes': _n_faltantes,
+            'f_con_name': f_con.name if f_con else '',
+        }
+
+    # ── Display resultados (persiste entre clicks de descarga) ────────────────
+    _s = st.session_state.get('_paso12_state')
+    if _s and _s.get('paso_actual') == paso:
         st.divider()
         st.subheader("📊 Resultado")
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        total_term = calc_total_df(df_work)
-        total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
-        col_m1.metric("Terminales", f"${total_term:,.0f}",
-                      f"{df_work['operation_id'].nunique() if not df_work.empty else 0} facturas")
-        col_m2.metric("Deuda fija", f"${total_com:,.0f}", f"{len(rows_comision)} facturas")
-        col_m3.metric("TOTAL", f"${total_term + total_com:,.0f}")
-        col_m4.metric("Duplicados excluidos", dup_count)
+        col_m1.metric("Terminales", f"${_s['total_term']:,.0f}", f"{_s['n_terminales']} facturas")
+        col_m2.metric("Deuda fija", f"${_s['total_com']:,.0f}", f"{_s['n_comision']} facturas")
+        col_m3.metric("TOTAL", f"${_s['total_term'] + _s['total_com']:,.0f}")
+        col_m4.metric("Duplicados excluidos", _s['dup_count'])
 
-        # Alertas generales
-        if casos_act:
-            st.warning(f"⚠️ **{len(casos_act)} contacto(s)** con RUT cambiado — se archivan con _old y se crea contacto nuevo.")
-        if casos_actualizar:
-            st.info(f"ℹ️ **{len(casos_actualizar)} contacto(s)** sin RUT en Odoo — se actualizan con datos de billing.")
-        if casos_dc:
-            st.info(f"ℹ️ **{len(casos_dc)} contacto(s)** con datos distintos en billing — ver archivo de actualizaciones.")
-        if alertas_op:
-            st.warning(f"⚠️ **{len(alertas_op)} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
-        if alertas_fmt:
-            st.warning(f"⚠️ **{len(alertas_fmt)} fila(s)** con formato desconocido — ver hoja Resumen.")
-        if csc:
-            st.warning(f"⚠️ **{len(csc)} Deuda(s) fija(s)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
-        if alertas_monto:
-            st.warning(f"⚠️ **{len(alertas_monto)} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
+        if _s['n_casos_act']:
+            st.warning(f"⚠️ **{_s['n_casos_act']} contacto(s)** con RUT cambiado — se archivan con _old y se crea contacto nuevo.")
+        if _s['n_casos_actualizar']:
+            st.info(f"ℹ️ **{_s['n_casos_actualizar']} contacto(s)** sin RUT en Odoo — se actualizan con datos de billing.")
+        if _s['n_casos_dc']:
+            st.info(f"ℹ️ **{_s['n_casos_dc']} contacto(s)** con datos distintos en billing — ver archivo de actualizaciones.")
+        if _s['n_alertas_op']:
+            st.warning(f"⚠️ **{_s['n_alertas_op']} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
+        if _s['n_alertas_fmt']:
+            st.warning(f"⚠️ **{_s['n_alertas_fmt']} fila(s)** con formato desconocido — ver hoja Resumen.")
+        if _s['n_csc']:
+            st.warning(f"⚠️ **{_s['n_csc']} Deuda(s) fija(s)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
+        if _s['n_alertas_monto']:
+            st.warning(f"⚠️ **{_s['n_alertas_monto']} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
 
-        # ── Descargas ─────────────────────────────────────────────
         st.divider()
         st.subheader("📥 Descargar archivos")
         dl_col1, dl_col2 = st.columns(2)
 
-        # Archivo de contactos nuevos (crear)
-        if hay_contactos_nuevos:
-            with st.spinner("Generando contactos_nuevos.xlsx..."):
-                excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
-            nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
-            with dl_col1:
-                st.warning(f"⚠️ {len(casos_crear)} contacto(s) nuevo(s) — importalos en Odoo")
+        with dl_col1:
+            if _s['excel_cont']:
+                st.warning(f"⚠️ {_s['n_crear']} contacto(s) nuevo(s) — importalos en Odoo")
                 st.download_button(
-                    label=f"📋 {nombre_cont}",
-                    data=excel_cont,
-                    file_name=nombre_cont,
+                    label=f"📋 {_s['nombre_cont']}",
+                    data=_s['excel_cont'],
+                    file_name=_s['nombre_cont'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     help="Importar en Odoo → Contactos → Importar registros"
                 )
-        elif not hay_actualizaciones:
-            with dl_col1:
+            elif not _s['hay_actualizaciones']:
                 st.success("✅ Todos los contactos ya están en Odoo")
 
-        # Archivo de actualizaciones (Output 2)
-        if hay_actualizaciones:
-            with st.spinner("Generando contactos_actualizar.xlsx..."):
-                excel_act = generar_excel_actualizacion(casos_act, casos_actualizar, casos_dc, refs)
-            nombre_act = f"contactos_actualizar_{date.today().strftime('%Y%m%d')}.xlsx"
-            with dl_col2:
-                partes = []
-                if casos_act:        partes.append(f"{len(casos_act)} baja(s) _old")
-                if casos_actualizar: partes.append(f"{len(casos_actualizar)} actualización(es) NIF")
-                if casos_dc:         partes.append(f"{len(casos_dc)} dato(s) distinto(s)")
-                st.warning(f"⚠️ {' | '.join(partes)}")
+        with dl_col2:
+            if _s['excel_act']:
+                st.warning(f"⚠️ {' | '.join(_s['partes_act'])}")
                 st.download_button(
-                    label=f"🔄 {nombre_act}",
-                    data=excel_act,
-                    file_name=nombre_act,
+                    label=f"🔄 {_s['nombre_act']}",
+                    data=_s['excel_act'],
+                    file_name=_s['nombre_act'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     help="Importar en Odoo para actualizar contactos existentes"
                 )
 
-        # Archivo de facturación / instrucciones
-        if es_paso1:
+        if _s['es_paso1']:
             with dl_col2:
                 st.info(
                     "**PASO 1 completado.**\n\n"
@@ -2242,23 +2299,16 @@ def main():
                     "3. Exportá el res.partner actualizado desde Odoo\n"
                     "4. Volvé aquí, seleccioná **PASO 2** y subí el nuevo res.partner"
                 )
-        elif hay_contactos_nuevos:
+        elif _s['hay_contactos_nuevos']:
             with dl_col2:
-                # Mensaje claro explicando por qué no se generó la facturación
-                faltantes_lista = "\n".join(
-                    f"- **{c['nombre_cuenta']}** (ID: {c['id_cuenta']})"
-                    for c in casos_crear_bloqueantes[:10]
-                )
-                if len(casos_crear_bloqueantes) > 10:
-                    faltantes_lista += f"\n- ... y {len(casos_crear_bloqueantes)-10} más"
                 st.error(
                     f"⛔ **No se generó el archivo de facturación.**\n\n"
                     f"El archivo de contactos de Odoo que subiste "
-                    f"(**{f_con.name}**) no incluye {len(casos_crear_bloqueantes)} cuenta(s) "
+                    f"(**{_s['f_con_name']}**) no incluye {_s['n_faltantes']} cuenta(s) "
                     f"que aparecen en el collection. "
                     f"Esto ocurre cuando subiste un res.partner anterior a la importación "
                     f"de los contactos nuevos.\n\n"
-                    f"**Cuentas que faltan en Odoo:**\n{faltantes_lista}"
+                    f"**Cuentas que faltan en Odoo:**\n{_s['faltantes_lista']}"
                 )
                 st.info(
                     "**Qué tenés que hacer:**\n"
@@ -2268,27 +2318,15 @@ def main():
                     "4. Subí ese nuevo export en el campo **Contactos Odoo** (arriba)\n"
                     "5. Hacé clic en **Procesar** de nuevo"
                 )
-        elif df_work.empty and not rows_comision and not csc:
+        elif _s['sin_filas']:
             with dl_col2:
                 st.info("No hay filas para facturar en este collection.")
-        else:
-            empty_cols = ['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id',
-                          'monto','RUT_billing','RUT_odoo','razon_social','nombre_billing',
-                          'giro','domicilio','comuna','email','db_id','contacto_nombre',
-                          'monto_diferente','sin_datos','es_consumidor_final','fecha_compra']
-            with st.spinner("Generando Excel de facturación..."):
-                excel_fact = generar_excel_facturacion(
-                    df_work if not df_work.empty else pd.DataFrame(columns=empty_cols),
-                    rows_comision if hacer_comisiones else [],
-                    alertas_monto, alertas_op, alertas_fmt,
-                    comisiones_sin_cuenta=csc,
-                )
-            nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
+        elif _s['excel_fact']:
             with dl_col2:
                 st.download_button(
-                    label=f"🧾 {nombre_fact}",
-                    data=excel_fact,
-                    file_name=nombre_fact,
+                    label=f"🧾 {_s['nombre_fact']}",
+                    data=_s['excel_fact'],
+                    file_name=_s['nombre_fact'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     type="primary",
@@ -2478,10 +2516,11 @@ def main():
                 return
 
             # Contactos Odoo para chequeo de RUT
-            nif_to_ref_hw = {}
+            nif_to_ref_hw, ref_to_dbid_hw = {}, {}
             if f_hw_con:
                 refs_hw = leer_contactos(f_hw_con)
-                nif_to_ref_hw = refs_hw.get('nif_to_ref', {})
+                nif_to_ref_hw  = refs_hw.get('nif_to_ref', {})
+                ref_to_dbid_hw = refs_hw.get('ref_to_dbid', {})
 
             rows_data, contactos_nuevos, avisos = [], [], []
 
@@ -2515,6 +2554,13 @@ def main():
                 precio3 = _pneto(row['art3'], row['qty3']) if row.get('art3') else 0.0
                 precio_env_neto = round(11900 / 1.19, 2) if row['pago_envio'] else 0.0
 
+                # DB_ID de Odoo — lookup por fudo_id (= Referencia en el contacts file)
+                db_id_hw = ref_to_dbid_hw.get(str(row['fudo_id']), '')
+                # Fallback: buscar por RUT si no encontró por referencia
+                if not db_id_hw:
+                    rut_clean_hw = limpiar_rut(row['rut'])
+                    db_id_hw = refs_hw.get('nif_to_dbid', {}).get(rut_clean_hw, '') if f_hw_con else ''
+
                 # Chequeo de RUT
                 rut_clean = limpiar_rut(row['rut'])
                 if rut_clean and rut_clean not in nif_to_ref_hw:
@@ -2522,6 +2568,7 @@ def main():
 
                 rows_data.append({
                     **row,
+                    'db_id': db_id_hw,
                     'operation_id':      col_match['operation_id'] if col_match else '',
                     'odoo_art1':         odoo1 or row['art1'],
                     'odoo_art2':         odoo2,
