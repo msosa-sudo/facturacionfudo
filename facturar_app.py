@@ -866,10 +866,27 @@ HW_PRODUCT_MAP = {
 }
 CTA_HW = '310115 Ventas de Productos'
 
-def mapear_producto_hw(nombre: str):
+def mapear_producto_hw(nombre: str, precios: dict | None = None):
+    """Mapea nombre del sheet → nombre de producto Odoo.
+    Primero exacto contra HW_PRODUCT_MAP, luego fuzzy,
+    luego fuzzy contra claves de precios como fallback."""
     if not nombre:
         return None
-    return HW_PRODUCT_MAP.get(str(nombre).strip().lower())
+    from difflib import get_close_matches
+    k = str(nombre).strip().lower()
+    # 1. Exacto
+    if k in HW_PRODUCT_MAP:
+        return HW_PRODUCT_MAP[k]
+    # 2. Fuzzy contra mapa
+    m = get_close_matches(k, HW_PRODUCT_MAP.keys(), n=1, cutoff=0.6)
+    if m:
+        return HW_PRODUCT_MAP[m[0]]
+    # 3. Fuzzy contra precios (usa el nombre de la lista como nombre Odoo)
+    if precios:
+        pm = get_close_matches(k, precios.keys(), n=1, cutoff=0.6)
+        if pm:
+            return pm[0].title()
+    return None
 
 def _parse_num(v) -> float:
     """Convierte un valor de celda a float, manejando strings con $, puntos de miles, etc."""
@@ -895,7 +912,7 @@ def _parse_num(v) -> float:
 def leer_sheet_hw(f_bytes: bytes) -> tuple[list[dict], dict]:
     """Lee hoja 'Ventas (NEW)' y devuelve (filas sin facturar, precios netos)."""
     import openpyxl, io as _io
-    wb = openpyxl.load_workbook(_io.BytesIO(f_bytes))
+    wb = openpyxl.load_workbook(_io.BytesIO(f_bytes), data_only=True)
     ws = wb['Ventas (NEW)']
     # Precios desde Lista de precios (col B = modelo, col I = precio_aju con IVA)
     precios_netos = {}
@@ -1005,7 +1022,7 @@ def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
     fecha_hoy = date.today().strftime('%d/%m/%Y')
     for d in rows_data:
         db_id     = d.get('db_id', '')
-        referencia = str(d['pedido'])
+        referencia = f"Hardware #{d['pedido']} - {d['cuenta_fudo']}"
         op_id     = f"'{d['operation_id']}" if d.get('operation_id') else ''
         es_cf     = limpiar_rut(d.get('rut', '')) == '111111111'
         tipo_doc  = 'Boleta Electrónica' if es_cf else 'Factura Electrónica'
@@ -2533,20 +2550,25 @@ def main():
                         f"total: ${row['total']:,.0f})"
                     )
 
-                # Mapeo de productos
-                odoo1 = mapear_producto_hw(row['art1'])
-                odoo2 = mapear_producto_hw(row['art2']) if row.get('art2') else None
-                odoo3 = mapear_producto_hw(row['art3']) if row.get('art3') else None
+                # Mapeo de productos (con fuzzy matching)
+                odoo1 = mapear_producto_hw(row['art1'], precios)
+                odoo2 = mapear_producto_hw(row['art2'], precios) if row.get('art2') else None
+                odoo3 = mapear_producto_hw(row['art3'], precios) if row.get('art3') else None
                 if not odoo1:
                     avisos.append(f"⚠️ Pedido **#{row['pedido']}**: producto '{row['art1']}' no tiene mapeo en Odoo.")
 
-                # Precios netos por artículo
+                # Precios netos por artículo (con fuzzy matching)
                 def _pneto(nombre, qty):
+                    from difflib import get_close_matches
                     if not nombre or not qty:
                         return 0.0
                     k = nombre.strip().lower()
                     if k in precios:
                         return precios[k]
+                    # Fuzzy fallback
+                    m = get_close_matches(k, precios.keys(), n=1, cutoff=0.6)
+                    if m:
+                        return precios[m[0]]
                     return round(row['total'] / row['qty1'] / 1.19, 2)
 
                 precio1 = _pneto(row['art1'], row['qty1'])
