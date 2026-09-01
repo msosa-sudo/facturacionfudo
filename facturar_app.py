@@ -816,7 +816,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             db_id = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
         razon       = billing.get('Razón social', '')
         sin_datos   = (rut_billing == 'NO ENCONTRADO')
-        es_cf       = limpiar_rut(rut_billing) == '111111111'
+        es_cf       = (limpiar_rut(rut_billing) == '111111111' or
+                       limpiar_rut(rut_odoo)    == '111111111')
         # Fallback: cuenta en Odoo con RUT consumidor final pero sin billing data
         if sin_datos and limpiar_rut(rut_odoo) == '111111111':
             sin_datos = False
