@@ -737,10 +737,14 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                     'operation_id': opid, 'monto': monto_real, 'fecha': fecha_c
                 })
                 continue
-            billing_c = get_billing(acc_id, billing_raw, rl)
-            rut_c     = billing_c.get('RUT_clean', 'NO ENCONTRADO')
-            sin_dat_c = (rut_c == 'NO ENCONTRADO')
-            db_id_c   = ref_to_dbid.get(acc_id, '')
+            billing_c  = get_billing(acc_id, billing_raw, rl)
+            rut_c      = billing_c.get('RUT_clean', 'NO ENCONTRADO')
+            rut_odoo_c = ref_to_nif.get(acc_id, '')
+            es_cf_c    = (limpiar_rut(rut_c)      == '111111111' or
+                          limpiar_rut(rut_odoo_c) == '111111111')
+            # Si no hay billing pero es consumidor final en Odoo → no es "sin datos"
+            sin_dat_c  = (rut_c == 'NO ENCONTRADO') and not es_cf_c
+            db_id_c    = ref_to_dbid.get(acc_id, '')
             if not db_id_c:
                 rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
                 db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
@@ -754,7 +758,7 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                 'nombre_cuenta': slug_to_nombre.get(slug, acc_id),
                 'operation_id': opid, 'monto_real': monto_real,
                 'precio_sin_iva': monto_real / 1.19,
-                'RUT_billing': rut_c, 'RUT_odoo': ref_to_nif.get(acc_id, ''),
+                'RUT_billing': rut_c, 'RUT_odoo': rut_odoo_c,
                 'razon_social': billing_c.get('Razón social', ''),
                 'nombre_billing': billing_c.get('Nombre', ''),
                 'giro': billing_c.get('Giro', ''),
@@ -762,7 +766,7 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                 'comuna': billing_c.get('Comuna', ''),
                 'email': billing_c.get('Email', ''),
                 'db_id': db_id_c, 'sin_datos': sin_dat_c,
-                'es_consumidor_final': limpiar_rut(rut_c) == '111111111',
+                'es_consumidor_final': es_cf_c,
                 'fecha_compra': fecha_c, 'terminos': terminos,
             })
             continue
