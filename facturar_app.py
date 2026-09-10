@@ -1553,68 +1553,105 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
     ws_r = wb.create_sheet('Resumen')
     ws_r.column_dimensions['A'].width = 38
     ws_r.column_dimensions['B'].width = 48
-    ws_r.column_dimensions['C'].width = 18
-    ws_r.column_dimensions['D'].width = 28
+    ws_r.column_dimensions['A'].width = 34
+    ws_r.column_dimensions['B'].width = 18
+    ws_r.column_dimensions['C'].width = 16
+    ws_r.column_dimensions['D'].width = 16
+    ws_r.column_dimensions['E'].width = 14
     t1 = ws_r.cell(row=1, column=1, value='RESUMEN DE FACTURACIÓN')
     t1.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
     t1.fill = header_fill; t1.alignment = Alignment(horizontal='center', vertical='center')
-    ws_r.merge_cells('A1:C1'); ws_r.row_dimensions[1].height = 24
+    ws_r.merge_cells('A1:E1'); ws_r.row_dimensions[1].height = 24
     ws_r.cell(row=2, column=1, value=f"Fecha: {fecha_hoy}").font = Font(italic=True, name='Arial', size=10, color='666666')
 
-    def bloque(fila, label, valor, fill, nota=''):
-        c1 = ws_r.cell(row=fila, column=1, value=label)
-        c1.font = Font(bold=True, name='Arial', size=11); c1.fill = fill
-        c1.alignment = Alignment(vertical='center', horizontal='right')
-        c1.border = Border(outline=Side(style='thin'))
-        c2 = ws_r.cell(row=fila, column=2, value=valor)
-        c2.font = Font(bold=True, name='Arial', size=12, color='1F4E79'); c2.fill = fill
-        c2.number_format = '$#,##0'; c2.alignment = Alignment(horizontal='center', vertical='center')
-        c2.border = Border(outline=Side(style='thin'))
-        if nota: ws_r.cell(row=fila, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+    # Encabezados de columnas D y E
+    hdr_fill = PatternFill('solid', fgColor='D9D9D9')
+    for col, txt in [(4, 'Según Odoo'), (5, 'Diferencia')]:
+        hc = ws_r.cell(row=3, column=col, value=txt)
+        hc.font = Font(bold=True, name='Arial', size=10)
+        hc.fill = hdr_fill
+        hc.alignment = Alignment(horizontal='center')
+        hc.border = Border(outline=Side(style='thin'))
+
+    boleta_fill  = PatternFill('solid', fgColor='FFF2CC')
+    factura_fill = PatternFill('solid', fgColor='DDEEFF')
+    section_fill = PatternFill('solid', fgColor='3938A0')
 
     total_term = calc_total_df(df_work)
     df_ok_t    = df_work[~df_work['sin_datos']] if not df_work.empty else pd.DataFrame()
     df_nd_t    = df_work[df_work['sin_datos']]  if not df_work.empty else pd.DataFrame()
     total_com  = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
-    bloque(4, 'TOTAL COMPLETO (con IVA)', total_term + total_com, total_fill)
-
-    # ── Desglose Factura / Boleta ──────────────────────────────────────────────
-    boleta_fill  = PatternFill('solid', fgColor='FFF2CC')   # amarillo suave
-    factura_fill = PatternFill('solid', fgColor='DDEEFF')   # azul suave
 
     df_fact_t = df_ok_t[~df_ok_t['es_consumidor_final']] if not df_ok_t.empty else pd.DataFrame()
     df_bole_t = df_ok_t[df_ok_t['es_consumidor_final']]  if not df_ok_t.empty else pd.DataFrame()
     com_ok    = [r for r in rows_comision if not r['sin_datos']]
     com_fact  = [r for r in com_ok if not r.get('es_consumidor_final', False)]
     com_bole  = [r for r in com_ok if r.get('es_consumidor_final', False)]
+    com_nd    = [r for r in rows_comision if r['sin_datos']]
 
-    total_fact = calc_total_df(df_fact_t) + round(sum(r['monto_real'] for r in com_fact))
-    total_bole = calc_total_df(df_bole_t) + round(sum(r['monto_real'] for r in com_bole))
-    n_fact     = df_fact_t['operation_id'].nunique() + len(com_fact) if not df_fact_t.empty else len(com_fact)
-    n_bole     = df_bole_t['operation_id'].nunique() + len(com_bole) if not df_bole_t.empty else len(com_bole)
+    def fila_resumen(fila, label, valor, fill, nota='', con_odoo=True):
+        """Escribe una fila: label | valor | nota | [Según Odoo vacío] | [=D-B]"""
+        c1 = ws_r.cell(row=fila, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=10); c1.fill = fill
+        c1.alignment = Alignment(vertical='center', horizontal='right')
+        c1.border = Border(outline=Side(style='thin'))
+        c2 = ws_r.cell(row=fila, column=2, value=valor)
+        c2.font = Font(bold=True, name='Arial', size=11, color='1F4E79'); c2.fill = fill
+        c2.number_format = '$#,##0'; c2.alignment = Alignment(horizontal='center', vertical='center')
+        c2.border = Border(outline=Side(style='thin'))
+        if nota:
+            ws_r.cell(row=fila, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+        if con_odoo:
+            cd = ws_r.cell(row=fila, column=4)  # Según Odoo — el usuario lo llena
+            cd.number_format = '$#,##0'
+            cd.border = Border(outline=Side(style='medium'))
+            cd.fill = PatternFill('solid', fgColor='FFFDE7')
+            ce = ws_r.cell(row=fila, column=5, value=f'=D{fila}-B{fila}')
+            ce.number_format = '$#,##0'
+            ce.font = Font(name='Arial', size=10, color='CC0000')
+            ce.border = Border(outline=Side(style='thin'))
 
-    if total_fact or total_bole:
-        bloque(5, 'Facturas Electrónicas', total_fact, factura_fill, f'→ {n_fact} factura(s)' if n_fact else '')
-        bloque(6, 'Boletas Electrónicas',  total_bole, boleta_fill,  f'→ {n_bole} boleta(s)'  if n_bole else '')
-        next_row = 7
+    def titulo_seccion(fila, texto):
+        c = ws_r.cell(row=fila, column=1, value=texto)
+        c.font = Font(bold=True, name='Arial', size=11, color='FFFFFF')
+        c.fill = section_fill
+        c.alignment = Alignment(horizontal='center', vertical='center')
+        ws_r.merge_cells(f'A{fila}:E{fila}')
+        ws_r.row_dimensions[fila].height = 18
+
+    # ── Totales globales ──
+    fila_resumen(4, 'TOTAL COMPLETO (con IVA)', total_term + total_com, total_fill, con_odoo=False)
+
+    # ── TERMINALES ──
+    titulo_seccion(5, 'TERMINALES')
+    n_fact_t = df_fact_t['operation_id'].nunique() if not df_fact_t.empty else 0
+    n_bole_t = df_bole_t['operation_id'].nunique() if not df_bole_t.empty else 0
+    fila_resumen(6, 'Facturas Electrónicas', calc_total_df(df_fact_t), factura_fill,
+                 f'→ {n_fact_t} factura(s)' if n_fact_t else '')
+    fila_resumen(7, 'Boletas Electrónicas',  calc_total_df(df_bole_t), boleta_fill,
+                 f'→ {n_bole_t} boleta(s)'  if n_bole_t else '')
+    if not df_nd_t.empty:
+        fila_resumen(8, 'Sin datos (billing)', calc_total_df(df_nd_t), red_fill,
+                     f'→ {df_nd_t["operation_id"].nunique()} entrada(s)', con_odoo=False)
+        next_row = 9
     else:
-        next_row = 5
+        next_row = 8
 
-    if not df_work.empty:
-        bloque(next_row,   'Terminales — listas para importar', calc_total_df(df_ok_t), green_fill,
-               f'→ {df_ok_t["operation_id"].nunique()} facturas' if not df_ok_t.empty else '')
-        bloque(next_row+1, 'Terminales — sin datos', calc_total_df(df_nd_t), red_fill,
-               f'→ {df_nd_t["operation_id"].nunique()} facturas' if not df_nd_t.empty else '')
-    if rows_comision:
-        com_nd = [r for r in rows_comision if r['sin_datos']]
-        bloque(next_row+2, 'Comisiones — listas para importar',
-               round(sum(r['monto_real'] for r in com_ok)), blue_fill, f'→ {len(com_ok)} factura(s)')
-        if com_nd:
-            bloque(next_row+3, 'Comisiones — sin datos (billing)',
-                   round(sum(r['monto_real'] for r in com_nd)), red_fill, f'→ {len(com_nd)} factura(s)')
+    # ── COMISIONES ──
+    titulo_seccion(next_row, 'COMISIONES')
+    fila_resumen(next_row+1, 'Facturas Electrónicas', round(sum(r['monto_real'] for r in com_fact)),
+                 factura_fill, f'→ {len(com_fact)} factura(s)' if com_fact else '')
+    fila_resumen(next_row+2, 'Boletas Electrónicas',  round(sum(r['monto_real'] for r in com_bole)),
+                 boleta_fill,  f'→ {len(com_bole)} boleta(s)'  if com_bole else '')
+    if com_nd:
+        fila_resumen(next_row+3, 'Sin datos (billing)', round(sum(r['monto_real'] for r in com_nd)),
+                     red_fill, f'→ {len(com_nd)} entrada(s)', con_odoo=False)
+        next_row = next_row + 4
+    else:
+        next_row = next_row + 3
 
     # ── Cuentas sin datos ──────────────────────────────────────────────────────
-    fila_det = 11
+    fila_det = next_row + 1
     if not df_nd_t.empty:
         c_lbl = ws_r.cell(row=fila_det, column=1, value='Cuentas sin datos:')
         c_lbl.font = Font(bold=True, name='Arial', size=10, color='CC0000')
