@@ -705,7 +705,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                     if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op      = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                     else pd.Series([False]*len(df_c), index=df_c.index))
-    mask_comision = df_c[col_desc].astype(str).str.contains('Deuda por comisiones', na=False)
+    mask_comision = df_c[col_desc].astype(str).str.contains(
+        'Deuda por comisiones|Suscripción de Tu Delivery|Comisiones TuDelivery', na=False)
     df_term = df_c[mask_reason | mask_extref | mask_op | mask_comision].copy().reset_index(drop=True)
 
     rows, rows_comision = [], []
@@ -723,14 +724,25 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             continue
 
         # ── Comisiones ────────────────────────────────────────────
-        if 'Deuda por comisiones' in desc_val:
+        _es_comision = ('Deuda por comisiones' in desc_val or
+                        'Suscripción de Tu Delivery' in desc_val or
+                        'Comisiones TuDelivery' in desc_val)
+        if _es_comision:
             if not hacer_comisiones:
                 continue
             fecha_c  = str(row.get(col_fecha, '')).strip().split(' ')[0]
             if fecha_c == 'nan': fecha_c = ''
             extref_v = str(row.get(col_extref, '') or '').strip() if tiene_extref else ''
-            slug = extref_v.split('@', 1)[1].lower() if '@' in extref_v else ''
-            acc_id = slug_to_accid.get(slug, '') if slug else ''
+            if '@' in extref_v:
+                # Formato normal: slug@fudo.do
+                slug   = extref_v.split('@', 1)[1].lower()
+                acc_id = slug_to_accid.get(slug, '')
+            elif '::' in extref_v:
+                # Formato TuDelivery: 169013::19477::1::fee_payment
+                acc_id = extref_v.split('::')[0].strip()
+                slug   = acc_id
+            else:
+                slug = extref_v; acc_id = slug_to_accid.get(slug, '')
             if not acc_id:
                 comisiones_sin_cuenta.append({
                     'extref': extref_v, 'slug': slug,
@@ -1812,8 +1824,16 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             continue
 
         # ── Deuda fija ────────────────────────────────────────
-        if 'Deuda por comisiones' in desc_val:
-            slug = extref.split('@', 1)[1].lower() if '@' in extref else extref
+        _es_df = ('Deuda por comisiones' in desc_val or
+                  'Suscripción de Tu Delivery' in desc_val or
+                  'Comisiones TuDelivery' in desc_val)
+        if _es_df:
+            if '@' in extref:
+                slug = extref.split('@', 1)[1].lower()
+            elif '::' in extref:
+                slug = extref.split('::')[0].strip()
+            else:
+                slug = extref
             estado = 'FACTURADO' if opid in ids_facturados_real else 'FALTANTE'
             filas.append({
                 'operation_id': opid, 'fecha': fecha, 'tipo': 'Deuda fija',
