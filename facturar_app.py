@@ -4,6 +4,8 @@ Facturación Terminales — Anser Indicus SPA
 Interfaz web Streamlit v1.0
 """
 import io, re, unicodedata, json, base64
+import plotly.express as px
+import plotly.graph_objects as go
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
@@ -509,39 +511,58 @@ def inferir_tipo_id(nif: str) -> str:
 def leer_contactos(f):
     df = pd.read_excel(f, dtype=str)
     df.columns = df.columns.str.strip()
-    requeridas = ['ID', 'Referencia', 'NIF', 'Nombre']
-    faltantes  = [c for c in requeridas if c not in df.columns]
+
+    # ── Aliases: soporta formato antiguo y nuevo de Odoo ──────
+    # NIF: antes "NIF", ahora "Identification Number"
+    col_nif = next((c for c in ['NIF', 'Identification Number'] if c in df.columns), None)
+    # Giro: antes "Giro", ahora "Descripcion de Actividad"
+    col_giro = next((c for c in ['Giro', 'Descripcion de Actividad'] if c in df.columns), None)
+    # Domicilio: antes "Nombre de la calle", ahora "Dirección completa"
+    col_dom = next((c for c in ['Nombre de la calle', 'Dirección completa', 'Direccion completa'] if c in df.columns), None)
+    # Email
+    col_email = next((c for c in ['Correo electrónico', 'Correo electronico', 'Email'] if c in df.columns), None)
+
+    requeridas = ['ID', 'Nombre']
+    if col_nif is None:
+        requeridas.append('NIF o Identification Number')
+    faltantes = [c for c in requeridas if c not in df.columns]
     if faltantes:
         raise ValueError(
             f"**Contactos Odoo**: columna(s) no encontrada(s): {', '.join(faltantes)}\n\n"
             f"Columnas que tiene el archivo: {_cols_disponibles(df)}\n\n"
             f"Verificá que sea la exportación de res.partner de Odoo"
         )
-    df['Referencia_clean'] = df['Referencia'].astype(str).str.strip()
-    df['NIF_clean'] = (df['NIF'].astype(str)
+
+    df['Referencia_clean'] = df['Referencia'].astype(str).str.strip() if 'Referencia' in df.columns else ''
+    df['NIF_clean'] = (df[col_nif].astype(str)
                        .str.replace('.', '', regex=False)
                        .str.replace('-', '', regex=False)
                        .str.strip().str.lower())
     df['DB_ID'] = df['ID'].astype(str).str.extract(r'res_partner_(\d+)_')
-    _cols_odoo = {'razon_social': 'Nombre', 'giro': 'Giro',
-                  'domicilio': 'Nombre de la calle', 'comuna': 'Ciudad'}
+
+    _cols_odoo = {
+        'razon_social': 'Nombre',
+        'giro':         col_giro,
+        'domicilio':    col_dom,
+        'comuna':       'Ciudad',
+    }
     ref_to_odoo_datos = {}
     ref_to_extra      = {}
-    _col_email = next((c for c in ['Correo electrónico', 'Correo electronico', 'Email'] if c in df.columns), None)
+
     for _, r in df.iterrows():
         ref = str(r.get('Referencia', '')).strip()
         if not ref or ref == 'nan':
             continue
         ref_to_odoo_datos[ref] = {
             c: str(r.get(co, '') or '').strip()
-            for c, co in _cols_odoo.items() if co in df.columns
+            for c, co in _cols_odoo.items() if co and co in df.columns
         }
-        nif_raw = str(r.get('NIF', '') or '').strip()
+        nif_raw = str(r.get(col_nif, '') or '').strip()
         ref_to_extra[ref] = {
             'external_id': str(r.get('ID', '') or '').strip(),
             'nif_raw':     nif_raw,
             'tipo_id':     inferir_tipo_id(nif_raw),
-            'email':       str(r.get(_col_email, '') or '').strip() if _col_email else '',
+            'email':       str(r.get(col_email, '') or '').strip() if col_email else '',
             'nombre':      str(r.get('Nombre', '') or '').strip(),
         }
     return {
@@ -2044,6 +2065,7 @@ def main():
             "🧾  PASO 2 — Facturar",
             "🔍  PASO 3 — Auditoría",
             "🖥️  Hardware",
+            "📊  Reportes",
         ], label_visibility="collapsed")
 
         es_paso1 = "PASO 1" in paso
@@ -2726,6 +2748,230 @@ def main():
         return  # no ejecutar PASO 1/2/3 — dentro del if es_hw
 
     # fin bloque Hardware
+
+    # ══════════════════════════════════════════════════════════
+    # REPORTES — Dashboard de facturación histórica
+    # ══════════════════════════════════════════════════════════
+    if "Reportes" in paso:
+        st.markdown("""
+        <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                    padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+            <div style="width:40px; height:40px; background:#3938A0; border-radius:10px;
+                        display:flex; align-items:center; justify-content:center; font-size:20px;">📊</div>
+            <div>
+                <div style="font-size:22px; font-weight:700; color:#3938A0;">Reportes</div>
+                <div style="font-size:13px; color:#888;">Dashboard histórico de facturación</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        archivos_rpt = st.file_uploader(
+            "Subí uno o más archivos de Auditoría (PASO 3)",
+            type=['xlsx'], accept_multiple_files=True, key='rpt_upload'
+        )
+
+        # Opcional: mapeo cuenta → vendedor
+        with st.expander("📁 Mapeo cuenta → vendedor (opcional)"):
+            st.caption("Subí un Excel con columnas 'ID Cuenta' y 'Vendedor' para activar el reporte de ventas por persona.")
+            f_vendedores = st.file_uploader("Mapeo vendedores", type=['xlsx','csv'], key='rpt_vend')
+
+        if not archivos_rpt:
+            st.info("Subí archivos de Auditoría para ver los reportes.")
+            return
+
+        # ── Leer y combinar ──────────────────────────────────
+        dfs = []
+        for f in archivos_rpt:
+            try:
+                df_tmp = pd.read_excel(f, sheet_name='Auditoría completa', dtype=str)
+                dfs.append(df_tmp)
+            except Exception as e:
+                st.warning(f"No se pudo leer {f.name}: {e}")
+        if not dfs:
+            return
+
+        df_all = pd.concat(dfs, ignore_index=True)
+        df_all = df_all.drop_duplicates(subset=['Operation ID'])
+
+        # Parsear fechas y montos
+        df_all['Fecha_dt'] = pd.to_datetime(df_all['Fecha'], format='%d/%m/%Y', errors='coerce')
+        df_all['Monto_n']  = pd.to_numeric(
+            df_all['Monto'].astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce'
+        ).fillna(0)
+        df_all['Mes']      = df_all['Fecha_dt'].dt.to_period('M')
+        df_all['Mes_str']  = df_all['Mes'].dt.strftime('%Y-%m')
+        df_all['Mes_label']= df_all['Fecha_dt'].dt.strftime('%b %Y')
+
+        meses_ord = sorted(df_all['Mes'].dropna().unique())
+        meses_str = [str(m) for m in meses_ord]
+
+        # ── Filtros en sidebar ───────────────────────────────
+        with st.sidebar:
+            st.divider()
+            st.markdown("**Filtrar período**")
+            if len(meses_str) >= 2:
+                idx_desde = st.selectbox("Desde", meses_str, index=0, key='rpt_desde')
+                idx_hasta = st.selectbox("Hasta", meses_str, index=len(meses_str)-1, key='rpt_hasta')
+            else:
+                idx_desde = idx_hasta = meses_str[0] if meses_str else ''
+
+            tipos_disp = ['Terminal', 'Deuda fija']
+            tipos_sel  = st.multiselect("Tipo", tipos_disp, default=tipos_disp, key='rpt_tipo')
+
+        mask = (
+            (df_all['Mes_str'] >= idx_desde) &
+            (df_all['Mes_str'] <= idx_hasta) &
+            (df_all['Tipo'].isin(tipos_sel))
+        )
+        df_f    = df_all[mask].copy()
+        df_fact = df_f[df_f['Estado'] == 'FACTURADO']
+        df_falt = df_f[df_f['Estado'] == 'FALTANTE']
+
+        term_f  = df_fact[df_fact['Tipo'] == 'Terminal']
+        df_f_   = df_fact[df_fact['Tipo'] == 'Deuda fija']
+
+        # ── Métricas ─────────────────────────────────────────
+        st.subheader("📈 Resumen del período")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Terminales facturadas", len(term_f))
+        m2.metric("Monto terminales",      f"${term_f['Monto_n'].sum():,.0f}")
+        m3.metric("Deuda fija facturada",  len(df_f_))
+        m4.metric("Monto deuda fija",      f"${df_f_['Monto_n'].sum():,.0f}")
+        m5.metric("Faltantes",             len(df_falt),
+                  delta=f"-{len(df_falt)}" if len(df_falt) else None,
+                  delta_color="inverse")
+
+        st.divider()
+
+        # ── Gráficos fila 1 ───────────────────────────────────
+        COLORES = {'Terminal': '#3938A0', 'Deuda fija': '#FF5023', 'FACTURADO': '#22C55E', 'FALTANTE': '#EF4444'}
+
+        col_g1, col_g2 = st.columns([3, 2])
+
+        with col_g1:
+            # Barras agrupadas por mes: terminales vs deuda fija
+            by_m = (df_fact.groupby(['Mes_str', 'Tipo'])['Monto_n']
+                    .sum().reset_index()
+                    .sort_values('Mes_str'))
+            fig1 = px.bar(
+                by_m, x='Mes_str', y='Monto_n', color='Tipo',
+                barmode='group',
+                title='Monto facturado por mes',
+                labels={'Mes_str': '', 'Monto_n': 'Monto (CLP)', 'Tipo': ''},
+                color_discrete_map=COLORES,
+                text_auto='.2s'
+            )
+            fig1.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_family='Barlow', legend_orientation='h',
+                legend=dict(y=-0.2), margin=dict(t=40, b=0, l=0, r=0)
+            )
+            fig1.update_yaxes(tickprefix='$', tickformat=',')
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with col_g2:
+            # Dona: distribución por tipo
+            by_tipo = df_fact.groupby('Tipo')['Monto_n'].sum().reset_index()
+            fig2 = px.pie(
+                by_tipo, values='Monto_n', names='Tipo', hole=0.55,
+                title='Distribución por tipo',
+                color='Tipo', color_discrete_map=COLORES
+            )
+            fig2.update_traces(textposition='outside', textinfo='percent+label')
+            fig2.update_layout(
+                font_family='Barlow', showlegend=False,
+                paper_bgcolor='rgba(0,0,0,0)', margin=dict(t=40, b=0, l=0, r=0)
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # ── Gráfico fila 2: facturado vs faltante ─────────────
+        col_g3, col_g4 = st.columns([3, 2])
+
+        with col_g3:
+            by_estado = (df_f.groupby(['Mes_str', 'Estado'])['Monto_n']
+                         .sum().reset_index()
+                         .query("Estado in ['FACTURADO','FALTANTE']")
+                         .sort_values('Mes_str'))
+            fig3 = px.bar(
+                by_estado, x='Mes_str', y='Monto_n', color='Estado',
+                barmode='stack',
+                title='Facturado vs Faltante por mes',
+                labels={'Mes_str': '', 'Monto_n': 'Monto (CLP)', 'Estado': ''},
+                color_discrete_map=COLORES, text_auto='.2s'
+            )
+            fig3.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_family='Barlow', legend_orientation='h',
+                legend=dict(y=-0.2), margin=dict(t=40, b=0, l=0, r=0)
+            )
+            fig3.update_yaxes(tickprefix='$', tickformat=',')
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with col_g4:
+            # Top 10 cuentas por monto
+            top_c = (df_fact.groupby('Cuenta')['Monto_n']
+                     .sum().sort_values(ascending=True).tail(10).reset_index())
+            fig4 = px.bar(
+                top_c, x='Monto_n', y='Cuenta', orientation='h',
+                title='Top 10 cuentas',
+                labels={'Monto_n': 'Monto (CLP)', 'Cuenta': ''},
+                color_discrete_sequence=['#3938A0']
+            )
+            fig4.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                font_family='Barlow', margin=dict(t=40, b=0, l=0, r=0)
+            )
+            fig4.update_xaxes(tickprefix='$', tickformat=',')
+            st.plotly_chart(fig4, use_container_width=True)
+
+        # ── Vendedores (si hay mapeo) ─────────────────────────
+        if f_vendedores:
+            try:
+                ext = f_vendedores.name.split('.')[-1].lower()
+                df_vend = (pd.read_csv(f_vendedores, dtype=str) if ext == 'csv'
+                           else pd.read_excel(f_vendedores, dtype=str))
+                df_vend.columns = [c.strip() for c in df_vend.columns]
+                if 'ID Cuenta' in df_vend.columns and 'Vendedor' in df_vend.columns:
+                    df_merge = df_fact.merge(
+                        df_vend[['ID Cuenta','Vendedor']],
+                        left_on='ID Cuenta', right_on='ID Cuenta', how='left'
+                    )
+                    by_vend = (df_merge.groupby('Vendedor')['Monto_n']
+                               .agg(['sum','count']).reset_index()
+                               .rename(columns={'sum':'Monto','count':'Operaciones'})
+                               .sort_values('Monto', ascending=False))
+                    st.divider()
+                    st.subheader("👤 Ventas por persona")
+                    fig5 = px.bar(
+                        by_vend, x='Vendedor', y='Monto',
+                        text='Operaciones',
+                        title='Monto facturado por vendedor',
+                        color_discrete_sequence=['#FF5023']
+                    )
+                    fig5.update_layout(
+                        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                        font_family='Barlow', margin=dict(t=40, b=0, l=0, r=0)
+                    )
+                    fig5.update_yaxes(tickprefix='$', tickformat=',')
+                    st.plotly_chart(fig5, use_container_width=True)
+                    st.dataframe(by_vend, use_container_width=True)
+                else:
+                    st.warning("El archivo de vendedores debe tener columnas 'ID Cuenta' y 'Vendedor'.")
+            except Exception as e:
+                st.error(f"Error leyendo archivo de vendedores: {e}")
+
+        # ── Tabla detalle ─────────────────────────────────────
+        st.divider()
+        with st.expander("🔎 Ver detalle completo"):
+            st.dataframe(
+                df_fact[['Fecha','Tipo','Cuenta','ID Cuenta','Operation ID','Monto_n','Estado']]
+                .rename(columns={'Monto_n':'Monto'})
+                .sort_values('Fecha', ascending=False),
+                use_container_width=True
+            )
+
+        return
+
+    # fin bloque Reportes
 
 
 if __name__ == '__main__':
