@@ -514,9 +514,9 @@ def leer_contactos(f):
 
     # ── Aliases: soporta formato antiguo y nuevo de Odoo ──────
     # NIF: antes "NIF", ahora "Identification Number"
-    col_nif = next((c for c in ['NIF', 'Identification Number'] if c in df.columns), None)
-    # Giro: antes "Giro", ahora "Descripcion de Actividad"
-    col_giro = next((c for c in ['Giro', 'Descripcion de Actividad'] if c in df.columns), None)
+    col_nif = next((c for c in ['NIF', 'Identification Number', 'Número de Identificación', 'Numero de Identificacion'] if c in df.columns), None)
+    # Giro: antes "Giro", ahora "Descripcion de Actividad" o "Descripción de la actividad"
+    col_giro = next((c for c in ['Giro', 'Descripcion de Actividad', 'Descripción de la actividad'] if c in df.columns), None)
     # Domicilio: antes "Nombre de la calle", ahora "Dirección completa"
     col_dom = next((c for c in ['Nombre de la calle', 'Dirección completa', 'Direccion completa'] if c in df.columns), None)
     # Email
