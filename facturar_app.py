@@ -1082,7 +1082,7 @@ def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
         referencia = f"Hardware #{d['pedido']} - {d['cuenta_fudo']}"
         op_id     = f"'{d['operation_id']}" if d.get('operation_id') else ''
         es_cf     = limpiar_rut(d.get('rut', '')) == '111111111'
-        tipo_doc  = 'Electronic Receipt' if es_cf else 'Electronic Invoice'
+        tipo_doc  = 'Boleta Electrónica' if es_cf else 'Factura Electrónica'
         sin_opid  = not d.get('operation_id')
         sin_dbid  = not db_id
 
@@ -1096,7 +1096,7 @@ def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
             if i == 0:
                 fila = [None, db_id or '', referencia,
                         fecha_hoy, fecha_hoy, op_id,
-                        'Electronic Invoice', tipo_doc,
+                        'Factura Electrónica', tipo_doc,
                         prod, CTA_HW, qty, round(precio, 4), 'IVA 19 Venta', 0]
             else:
                 fila = [None, None, None, None, None, None, None, None,
@@ -1519,13 +1519,13 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
         es_primera = row['operation_id'] != prev_opid
         if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
         else: orden_val = ''
-        tipo_doc    = 'Electronic Receipt' if row['es_consumidor_final'] else 'Electronic Invoice'
+        tipo_doc    = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
         nombre_ref  = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
         contacto_v  = row['db_id'] if row['db_id'] != 'ND' else ''
         if es_primera:
             data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
                     fecha_hoy, fecha_hoy, f"'{row['operation_id']}",
-                    'Electronic Invoice', tipo_doc, PROD_TERM, CTA_TERM,
+                    'Factura Electrónica', tipo_doc, PROD_TERM, CTA_TERM,
                     int(row['cantidad']), PRECIO_UNIT, 'IVA 19 Venta', row['descuento']]
         else:
             data = ['','','','','','','','', PROD_TERM, CTA_TERM,
@@ -1552,11 +1552,11 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
                        'Líneas de factura/Impuesto','Líneas de factura/Descuento (%)']
         aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
         for row_idx, rc in enumerate(rows_comision, 2):
-            tipo_doc_c   = 'Electronic Receipt' if rc['es_consumidor_final'] else 'Electronic Invoice'
+            tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
             nombre_ref_c = rc['nombre_billing'] if rc['nombre_billing'] else rc['nombre_cuenta']
             data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
                       nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
-                      rc['terminos'], 'Electronic Invoice', tipo_doc_c,
+                      rc['terminos'], 'Factura Electrónica', tipo_doc_c,
                       PROD_COM, CTA_COM, 1, rc['precio_sin_iva'], 'IVA 19 Venta', 0]
             for col_idx, val in enumerate(data_c, 1):
                 cell = ws_com.cell(row=row_idx, column=col_idx, value=val)
