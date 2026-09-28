@@ -344,6 +344,8 @@ PROD_TERM     = '[SPFP] SmartPOS Urovo i9100'
 CTA_TERM      = '310114 Venta de Devices Fudo Pagos'
 PROD_COM      = 'Comisiones T.O. Plus'
 CTA_COM       = '310160 Comisiones Tienda online'
+PROD_DV       = 'Comisiones T.O. Plus'
+CTA_DV        = '310160 Comisiones Tienda online'
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def normalizar(s):
@@ -1064,6 +1066,209 @@ def match_hw(row: dict, coll: list[dict]) -> dict | None:
             if e['email'] == email:
                 return e
     return None
+
+# ─── Deuda Viva ───────────────────────────────────────────────────────────────
+
+@st.cache_data
+def leer_extracto_dv(f_bytes: bytes) -> list[dict]:
+    """Lee el extracto de Deuda Viva (MP) y agrupa Importe por ID de Dash."""
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(f_bytes), data_only=True)
+    ws = wb.active
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+
+    def col_exact(name):
+        """Columna que coincide exactamente con name (case-insensitive)."""
+        for i, h in enumerate(headers):
+            if h and str(h).strip().lower() == name.lower():
+                return i + 1
+        return None
+
+    def col_contains(kw):
+        """Columna que contiene kw (fallback)."""
+        for i, h in enumerate(headers):
+            if h and kw.lower() in str(h).lower():
+                return i + 1
+        return None
+
+    # Buscar ID exacto primero para evitar match con "Contacto/Id de la DB"
+    c_id      = col_exact('id') or col_exact('ID') or col_exact('Fudo ID')
+    c_nombre  = col_exact('nombre') or col_contains('nombre')
+    c_importe = col_exact('importe') or col_contains('importe')
+
+    if not c_id or not c_importe:
+        raise ValueError("El extracto no tiene las columnas esperadas (ID, Importe).")
+
+    acumulado = {}  # id_dash → {nombre, monto_bruto}
+    for r in range(2, ws.max_row + 1):
+        id_dash  = str(ws.cell(r, c_id).value or '').strip()
+        nombre   = str(ws.cell(r, c_nombre).value or '').strip() if c_nombre else ''
+        importe  = _parse_num(ws.cell(r, c_importe).value)
+        if not id_dash or id_dash.lower() in ('none', ''):
+            continue
+        if id_dash not in acumulado:
+            acumulado[id_dash] = {'nombre': nombre, 'monto_bruto': 0.0}
+        acumulado[id_dash]['monto_bruto'] += importe
+        if not acumulado[id_dash]['nombre'] and nombre:
+            acumulado[id_dash]['nombre'] = nombre
+
+    result = []
+    for id_dash, data in sorted(acumulado.items(), key=lambda x: x[0]):
+        if data['monto_bruto'] > 0:
+            result.append({
+                'id_dash':     id_dash,
+                'nombre':      data['nombre'],
+                'monto_bruto': round(data['monto_bruto'], 2),
+                'monto_neto':  round(data['monto_bruto'] / 1.19, 4),
+            })
+    return result
+
+
+def generar_excel_factura_dv(rows_data: list[dict], fecha_factura: str) -> bytes:
+    """Genera el Excel de facturación Deuda Viva en el formato estándar de Odoo."""
+    wb = Workbook(); ws = wb.active; ws.title = 'Fact. DV'
+    hdrs = ['Orden', 'Contacto/Id. de la DB', 'Referencia',
+            'Fecha de Factura/Recibo', 'Fecha vencimiento', 'Referencia de pago',
+            'Términos y condiciones', 'Diario', 'Tipo de Documento',
+            'Líneas de factura/Producto', 'Líneas de factura/Cuenta',
+            'Líneas de factura/Cantidad mínima', 'Líneas de factura/Precio unitario',
+            'Líneas de factura/Impuesto', 'Líneas de factura/Descuento (%)']
+    aplicar_header(ws, hdrs, [8, 20, 30, 18, 18, 22, 38, 20, 20, 30, 28, 12, 20, 16, 14])
+
+    # Año desde la fecha de factura (formato dd/mm/yyyy)
+    try:
+        anno = fecha_factura.split('/')[-1]
+    except Exception:
+        anno = str(date.today().year)
+
+    for ri, d in enumerate(rows_data, 2):
+        db_id    = d.get('db_id', '')
+        sin_dbid = not db_id
+        ref_pago = f"{anno}-{d['id_dash']}"
+        terminos = f"T.O. Plus (DV) - {d['nombre']}"
+        es_cf    = d.get('es_consumidor_final', True)  # por defecto boleta (consumidor final)
+        tipo_doc = 'Boleta Electrónica' if es_cf else 'Factura Electrónica'
+
+        fila = [None, db_id or '', d['nombre'],
+                fecha_factura, fecha_factura, ref_pago,
+                terminos, 'Factura Electrónica', tipo_doc,
+                PROD_DV, CTA_DV, 1, d['monto_neto'], 'IVA 19 Venta', 0]
+
+        for ci, val in enumerate(fila, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.font      = Font(name='Arial', size=10)
+            cell.alignment = Alignment(vertical='center')
+            if ci == 2:
+                if sin_dbid:
+                    cell.fill = orange_fill   # sin DB_ID: naranja
+                elif db_id:
+                    cell.fill = green_fill    # encontrado: verde
+            if ci == 13:
+                cell.number_format = '#,##0.0000'
+
+    output = io.BytesIO(); wb.save(output); output.seek(0)
+    return output.getvalue()
+
+
+def generar_excel_contactos_dv(sin_dbid: list[dict], billing_raw: dict, rl: dict) -> bytes:
+    """Genera archivo de contactos para cuentas DV sin DB_ID, usando billing para completar datos."""
+    hdrs = ['Nombre', 'Tipo de compañía', 'Empresa relacionada', 'Nombre de la calle',
+            'Ciudad', 'Provincia', 'Idioma', 'País', 'Tipo de identificación', 'NIF',
+            'Tipo de contribuyente', 'Giro', 'Correo DTE', 'Correo electrónico',
+            'Referencia', 'Compañía', 'Enlace a página web']
+    wb = Workbook(); ws = wb.active; ws.title = 'Contactos DV'
+    aplicar_header(ws, hdrs, [40, 15, 20, 35, 20, 25, 18, 10, 20, 15, 25, 30, 35, 35, 15, 20, 40])
+
+    for ri, d in enumerate(sin_dbid, 2):
+        billing = get_billing(d['id_dash'], billing_raw, rl)
+        rut     = billing.get('RUT_clean', '')
+        razon   = billing.get('Razon_social', d['nombre'])
+        giro    = billing.get('Giro', '')
+        ciudad  = billing.get('Comuna', '')
+        dom     = billing.get('Domicilio', '')
+        email   = billing.get('Email', '')
+        region  = buscar_region(ciudad, rl)
+        tipo_id = tipo_doc_rut(rut) if rut else 'RUT'  # RUT o Pasaporte
+
+        fila = [razon or d['nombre'], 'Compañía', '', dom, ciudad,
+                region, 'Spanish / Español', 'Chile', tipo_id, rut,
+                'IVA afecto 1ª categoría', giro, email, email,
+                d['id_dash'], 'Anser Indicus SPA',
+                f"https://dash.fu.do/accounts/{d['id_dash']}"]
+
+        sin_billing = not billing
+        for ci, val in enumerate(fila, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.font      = Font(name='Arial', size=10)
+            cell.alignment = Alignment(vertical='center')
+        # Color por estado: naranja si no hay billing, verde si completo, amarillo si falta RUT
+        if sin_billing:
+            for ci in range(1, len(fila) + 1):
+                ws.cell(ri, ci).fill = orange_fill
+        elif not rut:
+            ws.cell(ri, 10).fill = red_fill  # NIF en rojo si falta RUT
+
+    output = io.BytesIO(); wb.save(output); output.seek(0)
+    return output.getvalue()
+
+
+def generar_excel_resumen_dv(rows_data: list[dict], fecha_factura: str) -> bytes:
+    """Genera un resumen de Deuda Viva: boletas, facturas, sin DB_ID."""
+    boletas   = [d for d in rows_data if d.get('es_consumidor_final', True)]
+    facturas  = [d for d in rows_data if not d.get('es_consumidor_final', True)]
+    sin_dbid  = [d for d in rows_data if not d.get('db_id', '')]
+
+    wb = Workbook(); ws = wb.active; ws.title = 'Resumen DV'
+
+    def _h(row, col_, val, bold=False, fill=None):
+        c = ws.cell(row=row, column=col_, value=val)
+        c.font = Font(name='Arial', size=10, bold=bold)
+        c.alignment = Alignment(vertical='center')
+        if fill:
+            c.fill = fill
+        return c
+
+    _h(1, 1, f'Deuda Viva — {fecha_factura}', bold=True)
+    _h(3, 1, 'Tipo',    bold=True); _h(3, 2, 'Cantidad', bold=True); _h(3, 3, 'Monto bruto', bold=True); _h(3, 4, 'Monto neto', bold=True)
+    _h(4, 1, 'Boletas Electrónicas',   fill=green_fill);  _h(4, 2, len(boletas));  _h(4, 3, sum(d['monto_bruto'] for d in boletas));  _h(4, 4, sum(d['monto_neto'] for d in boletas))
+    _h(5, 1, 'Facturas Electrónicas',  fill=blue_fill);   _h(5, 2, len(facturas)); _h(5, 3, sum(d['monto_bruto'] for d in facturas)); _h(5, 4, sum(d['monto_neto'] for d in facturas))
+    _h(6, 1, 'Sin DB_ID (pendientes)', fill=orange_fill); _h(6, 2, len(sin_dbid)); _h(6, 3, sum(d['monto_bruto'] for d in sin_dbid)); _h(6, 4, sum(d['monto_neto'] for d in sin_dbid))
+    _h(7, 1, 'TOTAL',                  bold=True);        _h(7, 2, len(rows_data)); _h(7, 3, sum(d['monto_bruto'] for d in rows_data)); _h(7, 4, sum(d['monto_neto'] for d in rows_data))
+
+    for r in range(3, 8):
+        for c in range(3, 5):
+            ws.cell(r, c).number_format = '$#,##0'
+
+    ws.column_dimensions['A'].width = 28
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 16
+    ws.column_dimensions['D'].width = 16
+
+    output = io.BytesIO(); wb.save(output); output.seek(0)
+    return output.getvalue()
+
+
+def generar_excel_dv(rows_data: list[dict], fecha_factura: str) -> bytes:
+    """Genera workbook con hoja Fact. DV y hoja Resumen DV."""
+    import openpyxl as _ox
+    from copy import copy as _copy
+    wb_fact = _ox.load_workbook(io.BytesIO(generar_excel_factura_dv(rows_data, fecha_factura)))
+    wb_res  = _ox.load_workbook(io.BytesIO(generar_excel_resumen_dv(rows_data, fecha_factura)))
+    ws_src  = wb_res['Resumen DV']
+    ws_dst  = wb_fact.create_sheet('Resumen DV')
+    for row in ws_src.iter_rows():
+        for cell in row:
+            nc = ws_dst.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                nc.font          = _copy(cell.font)
+                nc.fill          = _copy(cell.fill)
+                nc.alignment     = _copy(cell.alignment)
+                nc.number_format = cell.number_format
+    for col_letter, dim in ws_src.column_dimensions.items():
+        ws_dst.column_dimensions[col_letter].width = dim.width
+    output = io.BytesIO(); wb_fact.save(output); output.seek(0)
+    return output.getvalue()
+
 
 def generar_excel_factura_hw(rows_data: list[dict]) -> bytes:
     """Genera el Excel de facturación de hardware en el mismo formato que terminales."""
@@ -2010,50 +2215,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Guía de uso ────────────────────────────────────────────
-    with st.expander("📖 Guía de uso — cómo funciona el procesador"):
-        st.markdown("""
-        ### Flujo de trabajo
-
-        **PASO 1 — Crear contactos**
-        Usalo cuando hay cuentas nuevas que todavía no están en Odoo.
-        1. Subí los 4 archivos requeridos y hacé clic en **Procesar**
-        2. Descargá el archivo `contactos_FECHA.xlsx` que genera el procesador
-        3. Importalo en Odoo: **Contactos → ⚙️ → Importar registros**
-        4. Una vez importado, **exportá el res.partner de nuevo desde Odoo** (ahora tiene los DB_IDs nuevos)
-        5. Con ese archivo actualizado, pasá al PASO 2
-
-        **PASO 2 — Facturar**
-        Usalo cuando todos los contactos ya están en Odoo con su DB_ID.
-        1. Seleccioná qué querés facturar: **Terminales** o **Deuda fija**
-        2. Subí los 4 archivos (con el res.partner actualizado de Odoo)
-        3. Si facturás **Deuda fija**, subí también el Accounts CSV
-        4. Hacé clic en **Procesar** y descargá `facturar_terminales_FECHA.xlsx`
-        5. Importalo en Odoo para crear las facturas
-
-        ---
-        ### Archivos requeridos
-
-        | Archivo | Dónde lo obtenés |
-        |---|---|
-        | **Collection Mercado Pago** | Portal Mercado Pago → Actividades → Exportar |
-        | **Billing data** | dash.fu.do → Exportar billing |
-        | **Contactos Odoo** (res.partner) | Odoo → Contactos → Exportar → res.partner |
-        | **Asiento contable** | Odoo → Contabilidad → Asientos → Exportar |
-        | **Accounts CSV** *(solo Deuda fija)* | dash.fu.do → Cuentas → Exportar |
-
-        ---
-        ### Colores en los archivos Excel
-
-        | Color | Significado |
-        |---|---|
-        | 🔴 Fila roja | Cuenta sin datos de facturación (sin RUT en billing) |
-        | 🟠 Celda naranja | Sin DB_ID en Odoo — no se puede importar todavía |
-        | 🟡 Celda amarilla | Verificar manualmente (monto diferente u otro aviso) |
-        | 🟢 OK / verde | Todo en orden |
-        | 🔴 SUPERA LÍMITE SII | La comuna tiene más de 20 caracteres — SII rechazará la factura |
-        """)
-
     st.divider()
 
     # ── Sidebar ────────────────────────────────────────────────
@@ -2065,14 +2226,18 @@ def main():
             "🧾  PASO 2 — Facturar",
             "🔍  PASO 3 — Auditoría",
             "🖥️  Hardware",
+            "📄  Deuda Viva",
             "📊  Reportes",
+            "📖  Guía de uso",
         ], label_visibility="collapsed")
 
         es_paso1 = "PASO 1" in paso
         es_hw    = "Hardware" in paso
+        es_dv    = "Deuda Viva" in paso
+        es_guia  = "Guía" in paso
 
         tipo_fact = "Terminales + Deuda fija"  # default
-        if not es_paso1 and not es_hw:
+        if not es_paso1 and not es_hw and not es_dv and not es_guia:
             st.markdown("**¿Qué querés facturar?**")
             tipo_fact = st.selectbox("", [
                 "Terminales",
@@ -2104,6 +2269,11 @@ def main():
     proc_term = hacer_terminales or es_paso1
     proc_com  = hacer_comisiones or es_paso1
 
+    # ── Guía: early return antes de mostrar uploaders ───────────
+    if es_guia:
+        _render_guia()
+        return
+
     # ── File uploaders ──────────────────────────────────────────
     st.subheader("📁 Archivos requeridos")
     col1, col2 = st.columns(2)
@@ -2128,6 +2298,16 @@ def main():
         f_acc = st.file_uploader(
             "Accounts CSV  *(necesario para Deuda fija)*", type=['csv'],
             help="accounts_FECHA.csv exportado de dash.fu.do")
+
+    f_dv_ext_p1 = None
+    if es_paso1 and not es_guia:
+        st.subheader("📁 Adicional para Deuda Viva *(opcional)*")
+        f_dv_ext_p1 = st.file_uploader(
+            "Extracto Deuda Viva  *(opcional — para incluir contactos DV nuevos)*",
+            type=['xlsx'],
+            help="Si subís este archivo, el PASO 1 detecta qué cuentas DV no están en Odoo y las agrega al archivo de contactos",
+            key='p1_dv_extracto'
+        )
 
     # ── Pagos manuales (no en collection) ───────────────────────
     with st.expander("📎 Pagos recientes no incluidos en el collection *(opcional)*"):
@@ -2281,6 +2461,38 @@ def main():
             casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar = clasificar_contactos(
                 df_work, df_comision, refs, rl
             )
+
+        # ── Deuda Viva: agregar cuentas DV sin DB_ID a casos_crear ──
+        if f_dv_ext_p1:
+            try:
+                filas_dv_p1     = leer_extracto_dv(f_dv_ext_p1.read())
+                ref_to_dbid_p1  = refs.get('ref_to_dbid', {})
+                ids_ya_en_crear = {c['id_cuenta'] for c in casos_crear}
+                n_dv_nuevos     = 0
+                for d in filas_dv_p1:
+                    id_dash = d['id_dash']
+                    if id_dash in ref_to_dbid_p1 or id_dash in ids_ya_en_crear:
+                        continue  # ya existe en Odoo o ya está en la lista
+                    billing_dv = get_billing(id_dash, billing_raw, rl)
+                    casos_crear.append({
+                        'id_cuenta':    id_dash,
+                        'nombre_cuenta': d['nombre'],
+                        'RUT':          billing_dv.get('RUT_clean', ''),
+                        'razon_social': billing_dv.get('Razon_social', d['nombre']),
+                        'giro':         billing_dv.get('Giro', ''),
+                        'domicilio':    billing_dv.get('Domicilio', ''),
+                        'comuna':       billing_dv.get('Comuna', ''),
+                        'email':        billing_dv.get('Email', ''),
+                        'region':       buscar_region(billing_dv.get('Comuna', ''), rl),
+                        'es_reemplazo': False,
+                        '_es_dv':       True,
+                    })
+                    ids_ya_en_crear.add(id_dash)
+                    n_dv_nuevos += 1
+                if n_dv_nuevos:
+                    st.info(f"📄 Se agregaron **{n_dv_nuevos}** cuentas Deuda Viva nuevas al archivo de contactos.")
+            except Exception as e:
+                st.warning(f"⚠️ No se pudieron procesar las cuentas DV: {e}")
 
         # Solo bloquea facturación si hay contactos completamente ausentes de Odoo.
         # casos_crear con es_reemplazo=True ya existen en Odoo (distinto RUT/ref) → solo advertencia.
@@ -2750,6 +2962,199 @@ def main():
     # fin bloque Hardware
 
     # ══════════════════════════════════════════════════════════
+    # DEUDA VIVA — Facturación mensual agrupada por ID de Dash
+    # ══════════════════════════════════════════════════════════
+    if "Deuda Viva" in paso:
+        st.markdown("""
+        <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                    padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+            <div style="width:40px; height:40px; background:#3938A0; border-radius:10px;
+                        display:flex; align-items:center; justify-content:center; font-size:20px;">📄</div>
+            <div>
+                <div style="font-size:22px; font-weight:700; color:#3938A0;">Deuda Viva</div>
+                <div style="font-size:13px; color:#888;">Facturación mensual T.O. Plus — agrupada por ID de Dash</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        dv_col1, dv_col2 = st.columns(2)
+        with dv_col1:
+            f_dv_ext = st.file_uploader(
+                "Extracto Mercado Pago Deuda Viva  *(requerido)*",
+                type=['xlsx'],
+                help="Archivo con columnas: ID, Nombre, Importe (una fila por transacción)",
+                key='dv_extracto'
+            )
+        with dv_col2:
+            f_dv_con = st.file_uploader(
+                "Contactos Odoo — res.partner  *(requerido)*",
+                type=['xlsx'],
+                help="Exportación del modelo res.partner desde Odoo (para buscar DB_ID por Referencia)",
+                key='dv_contactos'
+            )
+
+        # Selector de fecha de factura
+        hoy = date.today()
+        dv_col3, dv_col4 = st.columns(2)
+        with dv_col3:
+            mes_dv = st.selectbox(
+                "Mes de facturación",
+                options=list(range(1, 13)),
+                index=hoy.month - 1,
+                format_func=lambda m: MESES_ES[m],
+                key='dv_mes'
+            )
+        with dv_col4:
+            anno_dv = st.number_input(
+                "Año",
+                min_value=2020, max_value=2035,
+                value=hoy.year,
+                step=1,
+                key='dv_anno'
+            )
+
+        fecha_dv = f"01/{mes_dv:02d}/{anno_dv}"
+
+        archivos_dv_ok = bool(f_dv_ext and f_dv_con)
+        if not archivos_dv_ok:
+            faltantes_dv = [n for f, n in [(f_dv_ext, "Extracto DV"), (f_dv_con, "Contactos Odoo")] if not f]
+            st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(faltantes_dv)}**")
+
+        boton_dv = st.button(
+            "🚀  Procesar Deuda Viva",
+            type="primary",
+            use_container_width=True,
+            disabled=not archivos_dv_ok,
+            key='btn_dv'
+        )
+
+        if boton_dv:
+            with st.spinner("Leyendo extracto..."):
+                try:
+                    filas_dv = leer_extracto_dv(f_dv_ext.read())
+                except Exception as e:
+                    st.error(f"❌ **Extracto DV** ({f_dv_ext.name}): {e}"); return
+
+            with st.spinner("Leyendo contactos Odoo..."):
+                try:
+                    rl_dv   = cargar_regiones()
+                    refs_dv = leer_contactos(f_dv_con)
+                except Exception as e:
+                    st.error(f"❌ **Contactos** ({f_dv_con.name}): {e}"); return
+
+            ref_to_dbid_dv = refs_dv.get('ref_to_dbid', {})
+            ref_to_nif_dv  = refs_dv.get('ref_to_nif', {})
+
+            # Enriquecer cada fila con DB_ID y tipo de documento
+            sin_dbid_dv = []
+            for d in filas_dv:
+                id_dash = d['id_dash']
+                db_id   = ref_to_dbid_dv.get(id_dash, '')
+                nif_raw = ref_to_nif_dv.get(id_dash, '')
+                es_cf   = limpiar_rut(nif_raw) == '111111111' if nif_raw else True
+                d['db_id']               = db_id
+                d['es_consumidor_final'] = es_cf
+                if not db_id:
+                    sin_dbid_dv.append(d)
+
+            n_total   = len(filas_dv)
+            n_boletas = sum(1 for d in filas_dv if d.get('es_consumidor_final', True))
+            n_fact    = n_total - n_boletas
+            n_sindbid = len(sin_dbid_dv)
+
+            st.success(
+                f"✅ **{n_total}** cuentas procesadas — "
+                f"**{n_boletas}** Boletas / **{n_fact}** Facturas / "
+                f"**{n_sindbid}** sin DB_ID"
+            )
+            if n_sindbid:
+                st.warning(
+                    f"⚠️ **{n_sindbid}** cuenta(s) no encontradas en Odoo. "
+                    "Aparecen en naranja en el Excel. Descargá el archivo de contactos para crearlas."
+                )
+
+            # Métricas rápidas
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Total cuentas",   n_total)
+            mc2.metric("Boletas",          n_boletas)
+            mc3.metric("Facturas",         n_fact)
+            mc4.metric("Sin DB_ID",        n_sindbid)
+
+            monto_total = sum(d['monto_bruto'] for d in filas_dv)
+            monto_neto  = sum(d['monto_neto']  for d in filas_dv)
+            mc5, mc6 = st.columns(2)
+            mc5.metric("Monto bruto total",  f"${monto_total:,.0f}")
+            mc6.metric("Monto neto total",   f"${monto_neto:,.2f}")
+
+            # Tabla de vista previa
+            with st.expander("📋 Vista previa de datos procesados"):
+                preview_rows = []
+                for d in filas_dv:
+                    preview_rows.append({
+                        'ID Dash':      d['id_dash'],
+                        'Nombre':       d['nombre'],
+                        'Monto bruto':  d['monto_bruto'],
+                        'Monto neto':   d['monto_neto'],
+                        'DB_ID':        d.get('db_id', ''),
+                        'Tipo Doc':     'Boleta Electrónica' if d.get('es_consumidor_final', True) else 'Factura Electrónica',
+                        'Ref. Pago':    f"{anno_dv}-{d['id_dash']}",
+                    })
+                st.dataframe(
+                    preview_rows,
+                    use_container_width=True,
+                    height=300
+                )
+
+            st.divider()
+            st.subheader("📥 Descargar archivos")
+
+            # Generar Excel de facturas + resumen
+            try:
+                excel_dv_bytes = generar_excel_dv(filas_dv, fecha_dv)
+                st.session_state['dv_excel']     = excel_dv_bytes
+                st.session_state['dv_fecha_str'] = fecha_dv.replace('/', '-')
+            except Exception as e:
+                st.error(f"❌ Error generando Excel: {e}"); return
+
+            # Generar Excel de contactos sin DB_ID (si hay)
+            if sin_dbid_dv:
+                try:
+                    excel_contactos_dv = generar_excel_contactos_dv(sin_dbid_dv, rl_dv)
+                    st.session_state['dv_contactos_excel'] = excel_contactos_dv
+                except Exception as e:
+                    st.warning(f"⚠️ No se pudo generar archivo de contactos: {e}")
+
+        # Botones de descarga (persisten entre reruns)
+        if st.session_state.get('dv_excel'):
+            fecha_str = st.session_state.get('dv_fecha_str', 'dv')
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    label="📥 Descargar Facturas DV",
+                    data=st.session_state['dv_excel'],
+                    file_name=f"facturas_dv_{fecha_str}.xlsx",
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    type='primary',
+                    key='dl_dv_fact'
+                )
+            with dl2:
+                if st.session_state.get('dv_contactos_excel'):
+                    st.download_button(
+                        label="📥 Descargar Contactos pendientes",
+                        data=st.session_state['dv_contactos_excel'],
+                        file_name=f"contactos_nuevos_dv_{fecha_str}.xlsx",
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        use_container_width=True,
+                        key='dl_dv_con'
+                    )
+                else:
+                    st.success("✅ Todas las cuentas tienen DB_ID en Odoo")
+
+        return  # no ejecutar PASO 1/2/3
+
+    # fin bloque Deuda Viva
+
+    # ══════════════════════════════════════════════════════════
     # REPORTES — Dashboard de facturación histórica
     # ══════════════════════════════════════════════════════════
     if "Reportes" in paso:
@@ -2972,6 +3377,130 @@ def main():
         return
 
     # fin bloque Reportes
+
+
+# ══════════════════════════════════════════════════════════
+# GUÍA DE USO — función standalone llamada desde main()
+# ══════════════════════════════════════════════════════════
+def _render_guia():
+    st.markdown("""
+    <div style="display:flex; align-items:center; gap:14px; margin-bottom:20px;
+                padding-bottom:16px; border-bottom:2px solid #E4E4F2;">
+        <div style="width:40px; height:40px; background:#3938A0; border-radius:10px;
+                    display:flex; align-items:center; justify-content:center; font-size:20px;">📖</div>
+        <div>
+            <div style="font-size:22px; font-weight:700; color:#3938A0;">Guía de uso</div>
+            <div style="font-size:13px; color:#888;">Cómo usar el procesador de facturación</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("""
+## Flujo mensual típico
+
+El procesador genera los archivos `.xlsx` listos para importar en Odoo. El proceso siempre sigue el mismo orden:
+
+---
+
+### 🗓️ A mitad de mes — Terminales y Deuda fija
+
+**Archivos que necesitás:**
+
+| Archivo | Dónde lo obtenés |
+|---|---|
+| **Collection Mercado Pago** | Portal MP → Actividades → Exportar |
+| **Billing data** | dash.fu.do → Admin → Exportar billing |
+| **Contactos Odoo** (res.partner) | Odoo → Contactos → ⚙️ → Exportar → res.partner |
+| **Asiento contable** | Odoo → Contabilidad → Asientos contables → Exportar |
+| **Accounts CSV** *(solo Deuda fija)* | dash.fu.do → Cuentas → Exportar |
+| **Extracto Deuda Viva** *(opcional en PASO 1)* | Portal MP → Deuda Viva → Exportar |
+
+---
+
+#### 📋 PASO 1 — Crear contactos *(solo si hay cuentas nuevas)*
+
+Antes de facturar, Odoo necesita tener creado el contacto de cada cuenta.
+
+1. Andá a **PASO 1** en el menú lateral
+2. Subí los 4 archivos base + Accounts CSV + Extracto DV *(si hay cuentas nuevas en DV)*
+3. Hacé clic en **Procesar**
+4. Si aparece el botón de descarga de contactos, descargá `contactos_nuevos_FECHA.xlsx`
+5. Importalo en Odoo: **Contactos → ⚙️ → Importar registros**
+6. Exportá el **res.partner actualizado** de Odoo (ya tiene los DB_IDs de las cuentas nuevas)
+
+> ✅ Si el procesador no genera archivo de contactos, todas las cuentas ya están en Odoo → ir directo al PASO 2.
+
+---
+
+#### 🧾 PASO 2 — Facturar Terminales y Deuda fija
+
+1. Andá a **PASO 2** en el menú lateral
+2. Seleccioná qué querés facturar: **Terminales**, **Deuda fija**, o **Terminales + Deuda fija**
+3. Subí los archivos (con el res.partner actualizado del paso anterior)
+4. Hacé clic en **Procesar**
+5. Descargá el Excel → importalo en Odoo: **Contabilidad → Facturas → ⚙️ → Importar registros**
+
+---
+
+### 🗓️ A fin de mes — Deuda Viva
+
+#### 📄 Sección Deuda Viva
+
+1. Exportá el extracto mensual completo del portal MP
+2. Andá a **Deuda Viva** en el menú lateral
+3. Subí el extracto DV + los contactos Odoo actualizados
+4. Elegí el mes y año de facturación
+5. Hacé clic en **Procesar Deuda Viva**
+6. Descargá el Excel de facturas y subilo a Odoo igual que en el PASO 2
+
+> 💡 Si aparecen cuentas en naranja (sin DB_ID), volvé al PASO 1 con el extracto DV para crear esos contactos primero.
+
+---
+
+### 🖥️ Hardware *(cuando corresponda)*
+
+1. Andá a la sección **Hardware**
+2. Subí el sheet de ventas + collection MP + contactos Odoo
+3. El procesador cruza las ventas con los pagos recibidos y genera el Excel de facturas
+
+---
+
+### 🔍 PASO 3 — Auditoría
+
+Usalo para verificar que lo que facturaste en Odoo coincide con los pagos del collection.
+
+1. Subí los mismos archivos que en PASO 2
+2. El resultado muestra qué facturas coinciden, cuáles tienen diferencia de monto y cuáles faltan
+
+---
+
+## Colores en los archivos Excel
+
+| Color | Significado |
+|---|---|
+| 🟢 Verde | Todo en orden — la fila está lista para importar |
+| 🟠 Naranja | Sin DB_ID en Odoo — crear el contacto antes de importar |
+| 🔴 Rojo | Sin datos de facturación (sin RUT en billing) — no se puede facturar |
+| 🟡 Amarillo | Verificar manualmente (monto diferente u otro aviso) |
+
+---
+
+## Preguntas frecuentes
+
+**¿Por qué aparece una cuenta en naranja?**
+El contacto no existe en Odoo o su referencia no coincide con el ID de Dash. Usá el PASO 1 para crearlo.
+
+**¿Por qué una cuenta tiene tipo de documento "Boleta Electrónica"?**
+Porque el RUT registrado en billing o en Odoo es `11111111-1` (Consumidor Final). Es correcto.
+
+**¿Qué pasa si no subo el Accounts CSV en Deuda fija?**
+El procesador omite las comisiones y solo procesa terminales.
+
+**¿Puedo subir el mismo extracto DV varias veces?**
+Sí, el procesador siempre agrupa por ID y suma el total del período que tenga el archivo.
+
+**¿Dónde veo el historial de lo que se facturó?**
+En la sección **Reportes**: subí los archivos de Auditoría de meses anteriores y genera los gráficos automáticamente.
+    """)
 
 
 if __name__ == '__main__':
