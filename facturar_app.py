@@ -603,24 +603,25 @@ def leer_accounts(f):
     return sa, sn
 
 # ─── Billing manual (pegar desde dash.fu.do) ─────────────────────────────────
-def parsear_billing_manual(texto: str) -> dict | None:
+def parsear_billing_manual(texto: str, override_id: str = '') -> dict | None:
     """
     Parsea el bloque copiado desde el panel de facturación de dash.fu.do.
-    Formato esperado: líneas "Clave<TAB>Valor" + URL de la cuenta al final.
+    Formato: líneas "Clave<TAB>Valor". URL opcional (se ignora si se pasa override_id).
     Retorna dict con: id_cuenta, rut, razon_social, giro, comuna, domicilio, email
-    o None si no se encontró la URL de la cuenta.
+    o None si no se puede determinar el ID de la cuenta.
     """
     datos = {}
-    id_cuenta = ''
+    id_cuenta = override_id.strip()
     for linea in texto.strip().splitlines():
         linea = linea.strip()
         if not linea:
             continue
-        # URL de la cuenta (puede estar en cualquier línea)
-        m = re.search(r'dash\.fu\.do/accounts/(\d+)', linea)
-        if m:
-            id_cuenta = m.group(1)
-            continue
+        # URL de la cuenta — solo se usa si no hay override_id
+        if not id_cuenta:
+            m = re.search(r'dash\.fu\.do/accounts/(\d+)', linea)
+            if m:
+                id_cuenta = m.group(1)
+                continue
         # Par clave-valor separado por tab
         if '\t' in linea:
             clave, _, valor = linea.partition('\t')
@@ -2359,17 +2360,46 @@ def main():
         )
 
     # ── Billing manual (cuentas sin Billing Data) ───────────────
-    with st.expander("📝 Datos de facturación manual *(opcional)*"):
+    if 'billing_manual' not in st.session_state:
+        st.session_state['billing_manual'] = []
+
+    _falta_billing = st.session_state.get('cuentas_sin_billing', {})
+    _ya_cargados   = {e['id_cuenta'] for e in st.session_state['billing_manual']}
+    _pendientes    = {k: v for k, v in _falta_billing.items() if k not in _ya_cargados}
+
+    _expander_label = (
+        f"📝 Datos de facturación manual — ⚠️ {len(_pendientes)} cuenta(s) pendiente(s)"
+        if _pendientes else
+        "📝 Datos de facturación manual *(opcional)*"
+    )
+    with st.expander(_expander_label, expanded=bool(_pendientes)):
         st.caption(
             "Para cuentas que cargaron sus datos hoy y aún no aparecen en el Billing Data. "
-            "Copiá el bloque desde la pestaña de facturación en dash.fu.do/accounts/… y pegalo acá."
+            "Hacé click en el link de la cuenta, copiá los datos de facturación y pegalo acá."
         )
-        if 'billing_manual' not in st.session_state:
-            st.session_state['billing_manual'] = []
+
+        # ── Lista de cuentas detectadas sin billing ──────────────
+        if _pendientes:
+            st.warning(f"⚠️ **{len(_pendientes)} cuenta(s) sin datos de facturación** del último procesamiento:")
+            for _bm_id, _bm_nombre in _pendientes.items():
+                st.markdown(
+                    f"→ **[{_bm_nombre or _bm_id}](https://dash.fu.do/accounts/{_bm_id})**"
+                    f" `ID: {_bm_id}`"
+                )
+            st.divider()
 
         with st.form("form_billing_manual", clear_on_submit=True):
+            if _pendientes:
+                _opciones_bm  = [''] + list(_pendientes.keys())
+                _formato_bm   = lambda x: f"{_pendientes[x]} ({x})" if x else "— seleccioná una cuenta —"
+                _sel_bm       = st.selectbox("Cuenta a cargar", options=_opciones_bm, format_func=_formato_bm)
+                _id_manual_bm = _sel_bm
+            else:
+                _id_manual_bm = st.text_input("ID de cuenta", placeholder="383653",
+                                               help="Número que aparece en dash.fu.do/accounts/…")
+
             texto_bm = st.text_area(
-                "Datos de la cuenta",
+                "Datos de facturación",
                 placeholder=(
                     "Tipo de identificación\tRUT\n"
                     "RUT\t78453772-2\n"
@@ -2379,27 +2409,30 @@ def main():
                     "Comuna\tSantiago Centro\n"
                     "Región\tMetropolitana\n"
                     "Domicilio\tAv. Ejemplo 1234\n"
-                    "Email\tejemplo@mail.com\n"
-                    "https://dash.fu.do/accounts/123456"
+                    "Email\tejemplo@mail.com"
                 ),
-                height=220,
-                label_visibility="collapsed",
+                height=200,
             )
             guardar_bm = st.form_submit_button("💾 Guardar cuenta", use_container_width=True)
             if guardar_bm:
-                if texto_bm.strip():
-                    _parsed_bm = parsear_billing_manual(texto_bm)
+                if not str(_id_manual_bm).strip():
+                    st.warning("Seleccioná o ingresá el ID de la cuenta.")
+                elif not texto_bm.strip():
+                    st.warning("Pegá los datos de facturación.")
+                else:
+                    _parsed_bm = parsear_billing_manual(texto_bm, override_id=str(_id_manual_bm).strip())
                     if _parsed_bm:
                         _ids_bm = {e['id_cuenta'] for e in st.session_state['billing_manual']}
                         if _parsed_bm['id_cuenta'] in _ids_bm:
                             st.warning(f"⚠️ La cuenta {_parsed_bm['id_cuenta']} ya fue cargada.")
                         else:
                             st.session_state['billing_manual'].append(_parsed_bm)
+                            # Quitar de pendientes
+                            if _parsed_bm['id_cuenta'] in st.session_state.get('cuentas_sin_billing', {}):
+                                del st.session_state['cuentas_sin_billing'][_parsed_bm['id_cuenta']]
                             st.rerun()
                     else:
-                        st.error("❌ No se encontró la URL de la cuenta. Asegurate de incluir la línea https://dash.fu.do/accounts/…")
-                else:
-                    st.warning("Pegá los datos de la cuenta primero.")
+                        st.error("❌ No se pudo parsear el bloque. Verificá el formato.")
 
         if st.session_state['billing_manual']:
             st.markdown(f"**{len(st.session_state['billing_manual'])} cuenta(s) cargada(s):**")
@@ -2576,6 +2609,22 @@ def main():
 
         df_work     = pd.DataFrame(rows)
         df_comision = pd.DataFrame(rows_comision)
+
+        # ── Detectar cuentas sin billing y guardar para el expander ──
+        _sin_billing_nuevo = {}
+        if not df_work.empty and 'sin_datos' in df_work.columns:
+            for _, _r in df_work[df_work['sin_datos'] == True].iterrows():
+                _bid = str(_r['id_cuenta'])
+                if _bid not in _sin_billing_nuevo:
+                    _sin_billing_nuevo[_bid] = str(_r.get('nombre_cuenta', _bid))
+        for _rc in rows_comision:
+            if _rc.get('sin_datos'):
+                _bid = str(_rc['id_cuenta'])
+                if _bid not in _sin_billing_nuevo:
+                    _sin_billing_nuevo[_bid] = str(_rc.get('nombre_cuenta', _bid))
+        # Excluir las que ya fueron cargadas manualmente
+        _ya_manual = {e['id_cuenta'] for e in st.session_state.get('billing_manual', [])}
+        st.session_state['cuentas_sin_billing'] = {k: v for k, v in _sin_billing_nuevo.items() if k not in _ya_manual}
 
         if df_work.empty and df_comision.empty and not csc:
             st.warning("⚠️ No se encontraron filas para procesar en el collection.")
