@@ -602,6 +602,55 @@ def leer_accounts(f):
             sn[s] = n
     return sa, sn
 
+# ─── Billing manual (pegar desde dash.fu.do) ─────────────────────────────────
+def parsear_billing_manual(texto: str) -> dict | None:
+    """
+    Parsea el bloque copiado desde el panel de facturación de dash.fu.do.
+    Formato esperado: líneas "Clave<TAB>Valor" + URL de la cuenta al final.
+    Retorna dict con: id_cuenta, rut, razon_social, giro, comuna, domicilio, email
+    o None si no se encontró la URL de la cuenta.
+    """
+    datos = {}
+    id_cuenta = ''
+    for linea in texto.strip().splitlines():
+        linea = linea.strip()
+        if not linea:
+            continue
+        # URL de la cuenta (puede estar en cualquier línea)
+        m = re.search(r'dash\.fu\.do/accounts/(\d+)', linea)
+        if m:
+            id_cuenta = m.group(1)
+            continue
+        # Par clave-valor separado por tab
+        if '\t' in linea:
+            clave, _, valor = linea.partition('\t')
+            clave = clave.strip().lower()
+            valor = valor.strip()
+            if 'rut' in clave and 'tipo' not in clave and 'identificación' not in clave and 'identificacion' not in clave:
+                datos['rut'] = valor
+            elif 'razón social' in clave or 'razon social' in clave:
+                datos['razon_social'] = valor
+            elif 'giro' in clave:
+                datos['giro'] = valor
+            elif 'comuna' in clave:
+                datos['comuna'] = valor
+            elif 'domicilio' in clave:
+                datos['domicilio'] = valor
+            elif 'email' in clave or 'correo' in clave:
+                datos['email'] = valor
+    if not id_cuenta:
+        return None
+    return {
+        'id_cuenta':    id_cuenta,
+        'rut':          datos.get('rut', ''),
+        'razon_social': datos.get('razon_social', ''),
+        'giro':         datos.get('giro', ''),
+        'comuna':       datos.get('comuna', ''),
+        'domicilio':    datos.get('domicilio', ''),
+        'email':        datos.get('email', ''),
+    }
+
+
 # ─── get_billing ──────────────────────────────────────────────────────────────
 def get_billing(id_cuenta, billing_raw, rl):
     datos = billing_raw.get(str(id_cuenta).strip(), {})
@@ -2309,6 +2358,64 @@ def main():
             key='p1_dv_extracto'
         )
 
+    # ── Billing manual (cuentas sin Billing Data) ───────────────
+    with st.expander("📝 Datos de facturación manual *(opcional)*"):
+        st.caption(
+            "Para cuentas que cargaron sus datos hoy y aún no aparecen en el Billing Data. "
+            "Copiá el bloque desde la pestaña de facturación en dash.fu.do/accounts/… y pegalo acá."
+        )
+        if 'billing_manual' not in st.session_state:
+            st.session_state['billing_manual'] = []
+
+        with st.form("form_billing_manual", clear_on_submit=True):
+            texto_bm = st.text_area(
+                "Datos de la cuenta",
+                placeholder=(
+                    "Tipo de identificación\tRUT\n"
+                    "RUT\t78453772-2\n"
+                    "Razón social\tGastronomía Ejemplo SPA\n"
+                    "Giro\tRestaurante\n"
+                    "País\tChile\n"
+                    "Comuna\tSantiago Centro\n"
+                    "Región\tMetropolitana\n"
+                    "Domicilio\tAv. Ejemplo 1234\n"
+                    "Email\tejemplo@mail.com\n"
+                    "https://dash.fu.do/accounts/123456"
+                ),
+                height=220,
+                label_visibility="collapsed",
+            )
+            guardar_bm = st.form_submit_button("💾 Guardar cuenta", use_container_width=True)
+            if guardar_bm:
+                if texto_bm.strip():
+                    _parsed_bm = parsear_billing_manual(texto_bm)
+                    if _parsed_bm:
+                        _ids_bm = {e['id_cuenta'] for e in st.session_state['billing_manual']}
+                        if _parsed_bm['id_cuenta'] in _ids_bm:
+                            st.warning(f"⚠️ La cuenta {_parsed_bm['id_cuenta']} ya fue cargada.")
+                        else:
+                            st.session_state['billing_manual'].append(_parsed_bm)
+                            st.rerun()
+                    else:
+                        st.error("❌ No se encontró la URL de la cuenta. Asegurate de incluir la línea https://dash.fu.do/accounts/…")
+                else:
+                    st.warning("Pegá los datos de la cuenta primero.")
+
+        if st.session_state['billing_manual']:
+            st.markdown(f"**{len(st.session_state['billing_manual'])} cuenta(s) cargada(s):**")
+            for _i_bm, _e_bm in enumerate(st.session_state['billing_manual']):
+                _c1_bm, _c2_bm = st.columns([9, 1])
+                with _c1_bm:
+                    _nombre_bm = _e_bm['razon_social'] or f"ID {_e_bm['id_cuenta']}"
+                    st.markdown(
+                        f"- **{_nombre_bm}** (ID: `{_e_bm['id_cuenta']}`) — "
+                        f"RUT: `{_e_bm['rut'] or '—'}` — {_e_bm['email'] or '—'}"
+                    )
+                with _c2_bm:
+                    if st.button("✕", key=f"del_bm_{_i_bm}"):
+                        st.session_state['billing_manual'].pop(_i_bm)
+                        st.rerun()
+
     # ── Pagos manuales (no en collection) ───────────────────────
     with st.expander("📎 Pagos recientes no incluidos en el collection *(opcional)*"):
         tiene_gemini = bool(st.secrets.get("GOOGLE_API_KEY", ""))
@@ -2418,6 +2525,23 @@ def main():
                 billing_raw = leer_billing(f_bil)
             except Exception as e:
                 st.error(f"❌ **Billing data** ({f_bil.name}): {e}"); return
+
+            # ── Merge billing manual ──────────────────────────────
+            _bm_entries = st.session_state.get('billing_manual', [])
+            for _bm in _bm_entries:
+                _bm_id  = str(_bm['id_cuenta']).strip()
+                _bm_rut = limpiar_rut(_bm['rut']) if _bm['rut'] else ''
+                billing_raw[_bm_id] = {
+                    'RUT_clean':    _bm_rut,
+                    'Razón social': _bm['razon_social'],
+                    'Nombre':       _bm['razon_social'],
+                    'Giro':         _bm['giro'],
+                    'Domicilio':    _bm['domicilio'],
+                    'Comuna':       _bm['comuna'],
+                    'Email':        _bm['email'],
+                }
+            if _bm_entries:
+                st.success(f"✅ {len(_bm_entries)} cuenta(s) de billing manual incorporada(s).")
             try:
                 refs = leer_contactos(f_con)
             except Exception as e:
