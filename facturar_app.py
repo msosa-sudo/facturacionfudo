@@ -1775,7 +1775,7 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
         if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
         else: orden_val = ''
         tipo_doc    = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
-        nombre_ref  = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+        nombre_ref  = row['nombre_cuenta'] or row['nombre_billing']
         contacto_v  = row['db_id'] if row['db_id'] != 'ND' else ''
         if es_primera:
             data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
@@ -1808,7 +1808,7 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
         aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
         for row_idx, rc in enumerate(rows_comision, 2):
             tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
-            nombre_ref_c = rc['nombre_billing'] if rc['nombre_billing'] else rc['nombre_cuenta']
+            nombre_ref_c = rc['nombre_cuenta'] or rc['nombre_billing']
             data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
                       nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
                       rc['terminos'], 'Factura Electrónica', tipo_doc_c,
