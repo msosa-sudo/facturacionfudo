@@ -3282,22 +3282,24 @@ def main():
 
             # Generar Excel de facturas + resumen
             try:
-                # Todas las cuentas van al Excel (incluyendo negativas).
-                # Las negativas entran como línea de ajuste negativa en Odoo,
-                # para que el total del Excel coincida con el extracto de MP.
-                filas_dv_fact = filas_dv
-                filas_dv_neg  = [d for d in filas_dv if d['monto_bruto'] < 0]
+                # Solo cuentas positivas — las negativas son devoluciones que MP ya procesó
+                # y no se pueden facturar. Se informa la diferencia con el extracto.
+                filas_dv_fact = [d for d in filas_dv if d['monto_bruto'] > 0]
+                filas_dv_neg  = [d for d in filas_dv if d['monto_bruto'] <= 0]
 
-                # Aviso informativo sobre cuentas con saldo negativo
                 if filas_dv_neg:
+                    total_ext  = sum(d['monto_bruto'] for d in filas_dv)
+                    total_fact = sum(d['monto_bruto'] for d in filas_dv_fact)
                     lineas_neg = "\n".join(
-                        f"- **{d['nombre']}** (ID {d['id_dash']}): ${d['monto_bruto']:,.0f} bruto / ${d['monto_neto']:,.2f} neto"
+                        f"- **{d['nombre']}** (ID {d['id_dash']}): ${d['monto_bruto']:,.0f}"
                         for d in filas_dv_neg
                     )
                     st.warning(
-                        f"⚠️ **{len(filas_dv_neg)} cuenta(s) con saldo negativo** — "
-                        f"MP ya descontó del pool. Se incluyen en el Excel como ajuste negativo.\n\n"
-                        f"{lineas_neg}"
+                        f"⚠️ **{len(filas_dv_neg)} cuenta(s) con saldo negativo excluida(s)** — "
+                        f"son devoluciones que MP ya procesó, no se facturan.\n\n"
+                        f"{lineas_neg}\n\n"
+                        f"El Excel de Odoo suma **${total_fact:,.0f}** (bruto). "
+                        f"El extracto muestra ${total_ext:,.0f} — diferencia de ${total_fact - total_ext:,.0f} por estas cuentas."
                     )
 
                 excel_dv_bytes = generar_excel_dv(filas_dv_fact, fecha_dv)
