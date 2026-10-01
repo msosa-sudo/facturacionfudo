@@ -3282,26 +3282,22 @@ def main():
 
             # Generar Excel de facturas + resumen
             try:
-                # Solo cuentas positivas — las negativas no se pueden facturar.
-                # MP ya descontó esos montos del pool.
-                filas_dv_fact   = [d for d in filas_dv if d['monto_bruto'] > 0]
-                filas_dv_neg    = [d for d in filas_dv if d['monto_bruto'] <= 0]
-                total_extracto  = sum(d['monto_bruto'] for d in filas_dv)
-                total_facturar  = sum(d['monto_bruto'] for d in filas_dv_fact)
-                diff_neg        = total_extracto - total_facturar  # siempre ≤ 0
+                # Todas las cuentas van al Excel (incluyendo negativas).
+                # Las negativas entran como línea de ajuste negativa en Odoo,
+                # para que el total del Excel coincida con el extracto de MP.
+                filas_dv_fact = filas_dv
+                filas_dv_neg  = [d for d in filas_dv if d['monto_bruto'] < 0]
 
-                # Aviso de cuentas negativas excluidas
+                # Aviso informativo sobre cuentas con saldo negativo
                 if filas_dv_neg:
                     lineas_neg = "\n".join(
-                        f"- **{d['nombre']}** (ID {d['id_dash']}): ${d['monto_bruto']:,.0f}"
+                        f"- **{d['nombre']}** (ID {d['id_dash']}): ${d['monto_bruto']:,.0f} bruto / ${d['monto_neto']:,.2f} neto"
                         for d in filas_dv_neg
                     )
                     st.warning(
-                        f"⚠️ **{len(filas_dv_neg)} cuenta(s) con saldo negativo excluida(s) del Excel** — "
-                        f"MP ya descontó estos montos del pool.\n\n"
-                        f"{lineas_neg}\n\n"
-                        f"**Diferencia entre extracto y Excel:** ${diff_neg:,.0f} "
-                        f"(extracto ${total_extracto:,.0f} vs facturación ${total_facturar:,.0f})"
+                        f"⚠️ **{len(filas_dv_neg)} cuenta(s) con saldo negativo** — "
+                        f"MP ya descontó del pool. Se incluyen en el Excel como ajuste negativo.\n\n"
+                        f"{lineas_neg}"
                     )
 
                 excel_dv_bytes = generar_excel_dv(filas_dv_fact, fecha_dv)
