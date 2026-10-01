@@ -3228,12 +3228,8 @@ def main():
                 if not db_id:
                     sin_dbid_dv.append(d)
 
-            # Separar cuentas facturables (positivas) de las que solo tienen devoluciones
-            filas_dv_fact = [d for d in filas_dv if d['monto_bruto'] > 0]
-            filas_dv_neg  = [d for d in filas_dv if d['monto_bruto'] <= 0]
-
-            n_total   = len(filas_dv_fact)
-            n_boletas = sum(1 for d in filas_dv_fact if d.get('es_consumidor_final', True))
+            n_total   = len(filas_dv)
+            n_boletas = sum(1 for d in filas_dv if d.get('es_consumidor_final', True))
             n_fact    = n_total - n_boletas
             n_sindbid = len(sin_dbid_dv)
 
@@ -3247,15 +3243,6 @@ def main():
                     f"⚠️ **{n_sindbid}** cuenta(s) no encontradas en Odoo. "
                     "Aparecen en naranja en el Excel. Descargá el archivo de contactos para crearlas."
                 )
-            if filas_dv_neg:
-                _neg_info = ", ".join(
-                    f"**{d['nombre'] or d['id_dash']}** (${d['monto_bruto']:,.0f})"
-                    for d in filas_dv_neg
-                )
-                st.info(
-                    f"ℹ️ {len(filas_dv_neg)} cuenta(s) con saldo negativo excluida(s) de la facturación: {_neg_info}. "
-                    f"El monto bruto total refleja el neto del extracto."
-                )
 
             # Métricas rápidas
             mc1, mc2, mc3, mc4 = st.columns(4)
@@ -3264,9 +3251,9 @@ def main():
             mc3.metric("Facturas",         n_fact)
             mc4.metric("Sin DB_ID",        n_sindbid)
 
-            # Monto bruto = neto del extracto (positivas + negativas)
+            # Métricas reflejan el total neto del extracto (incluye negativos como tnt fritos)
             monto_total = sum(d['monto_bruto'] for d in filas_dv)
-            monto_neto  = sum(d['monto_neto']  for d in filas_dv)
+            monto_neto  = round(monto_total / 1.19, 2)
             mc5, mc6 = st.columns(2)
             mc5.metric("Monto bruto total",  f"${monto_total:,.0f}")
             mc6.metric("Monto neto total",   f"${monto_neto:,.2f}")
@@ -3295,6 +3282,8 @@ def main():
 
             # Generar Excel de facturas + resumen
             try:
+                # Excel solo con cuentas positivas (no se pueden facturar negativos)
+                filas_dv_fact = [d for d in filas_dv if d['monto_bruto'] > 0]
                 excel_dv_bytes = generar_excel_dv(filas_dv_fact, fecha_dv)
                 st.session_state['dv_excel']     = excel_dv_bytes
                 st.session_state['dv_fecha_str'] = fecha_dv.replace('/', '-')
