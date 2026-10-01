@@ -3282,8 +3282,28 @@ def main():
 
             # Generar Excel de facturas + resumen
             try:
-                # Excel solo con cuentas positivas (no se pueden facturar negativos)
-                filas_dv_fact = [d for d in filas_dv if d['monto_bruto'] > 0]
+                # Solo cuentas positivas — las negativas no se pueden facturar.
+                # MP ya descontó esos montos del pool.
+                filas_dv_fact   = [d for d in filas_dv if d['monto_bruto'] > 0]
+                filas_dv_neg    = [d for d in filas_dv if d['monto_bruto'] <= 0]
+                total_extracto  = sum(d['monto_bruto'] for d in filas_dv)
+                total_facturar  = sum(d['monto_bruto'] for d in filas_dv_fact)
+                diff_neg        = total_extracto - total_facturar  # siempre ≤ 0
+
+                # Aviso de cuentas negativas excluidas
+                if filas_dv_neg:
+                    lineas_neg = "\n".join(
+                        f"- **{d['nombre']}** (ID {d['id_dash']}): ${d['monto_bruto']:,.0f}"
+                        for d in filas_dv_neg
+                    )
+                    st.warning(
+                        f"⚠️ **{len(filas_dv_neg)} cuenta(s) con saldo negativo excluida(s) del Excel** — "
+                        f"MP ya descontó estos montos del pool.\n\n"
+                        f"{lineas_neg}\n\n"
+                        f"**Diferencia entre extracto y Excel:** ${diff_neg:,.0f} "
+                        f"(extracto ${total_extracto:,.0f} vs facturación ${total_facturar:,.0f})"
+                    )
+
                 excel_dv_bytes = generar_excel_dv(filas_dv_fact, fecha_dv)
                 st.session_state['dv_excel']     = excel_dv_bytes
                 st.session_state['dv_fecha_str'] = fecha_dv.replace('/', '-')
