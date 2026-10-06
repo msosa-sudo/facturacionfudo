@@ -347,6 +347,14 @@ CTA_COM       = '310160 Comisiones Tienda online'
 PROD_DV       = 'Comisiones T.O. Plus'
 CTA_DV        = '310160 Comisiones Tienda online'
 
+# ─── Datos Consumidor Final (cuando no hay billing data) ──────────────────────
+CF_RUT        = '111111111'          # sin puntos ni guión (limpio)
+CF_RUT_DISPLAY = '11.111.111-1'
+CF_DOMICILIO  = 'Eliodoro Yáñez 2990'
+CF_CIUDAD     = 'Santiago'
+CF_REGION     = 'Metropolitana'
+CF_TIPO_CONT  = 'Consumidor Final'
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def normalizar(s):
     if not s or str(s).strip() == '' or str(s).lower() == 'nan': return ''
@@ -601,6 +609,41 @@ def leer_accounts(f):
             sa[s] = str(r['ID']).strip()
             sn[s] = n
     return sa, sn
+
+# ─── Extracto de mails (dash.fu.do → ID → email) ────────────────────────────
+def leer_extracto_mails(f) -> dict:
+    """
+    Lee el extracto de mails exportado de dash.fu.do.
+    Devuelve dict {id_cuenta (str) → email (str)}.
+    Busca columnas con 'id' y 'email'/'mail'/'correo' (case-insensitive).
+    """
+    try:
+        if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
+            df = pd.read_csv(f, dtype=str)
+        else:
+            df = pd.read_excel(f, dtype=str)
+    except Exception:
+        return {}
+    df.columns = df.columns.str.strip()
+    # Buscar columna ID
+    col_id = next((c for c in df.columns if c.strip().lower() == 'id'), None)
+    if not col_id:
+        col_id = next((c for c in df.columns if 'id' in c.lower()), None)
+    # Buscar columna email
+    col_email = next(
+        (c for c in df.columns if any(k in c.lower() for k in ['email','mail','correo'])),
+        None
+    )
+    if not col_id or not col_email:
+        return {}
+    result = {}
+    for _, r in df.iterrows():
+        id_v = str(r.get(col_id, '') or '').strip()
+        em   = str(r.get(col_email, '') or '').strip().lower()
+        if id_v and em and id_v.lower() not in ('nan', 'none', ''):
+            result[id_v] = em
+    return result
+
 
 # ─── Billing manual (pegar desde dash.fu.do) ─────────────────────────────────
 def parsear_billing_manual(texto: str, override_id: str = '') -> dict | None:
@@ -1219,7 +1262,7 @@ def generar_excel_factura_dv(rows_data: list[dict], fecha_factura: str) -> bytes
     return output.getvalue()
 
 
-def generar_excel_contactos_dv(sin_dbid: list[dict], billing_raw: dict, rl: dict) -> bytes:
+def generar_excel_contactos_dv(sin_dbid: list[dict], billing_raw: dict, rl: dict, emails_map: dict | None = None) -> bytes:
     """Genera archivo de contactos para cuentas DV sin DB_ID, usando billing para completar datos."""
     hdrs = ['Nombre', 'Tipo de compañía', 'Empresa relacionada', 'Nombre de la calle',
             'Ciudad', 'Provincia', 'Idioma', 'País', 'Tipo de identificación', 'NIF',
@@ -1228,34 +1271,47 @@ def generar_excel_contactos_dv(sin_dbid: list[dict], billing_raw: dict, rl: dict
     wb = Workbook(); ws = wb.active; ws.title = 'Contactos DV'
     aplicar_header(ws, hdrs, [40, 15, 20, 35, 20, 25, 18, 10, 20, 15, 25, 30, 35, 35, 15, 20, 40])
 
-    for ri, d in enumerate(sin_dbid, 2):
-        billing = get_billing(d['id_dash'], billing_raw, rl)
-        rut     = billing.get('RUT_clean', '')
-        razon   = billing.get('Razon_social', d['nombre'])
-        giro    = billing.get('Giro', '')
-        ciudad  = billing.get('Comuna', '')
-        dom     = billing.get('Domicilio', '')
-        email   = billing.get('Email', '')
-        region  = buscar_region(ciudad, rl)
-        tipo_id = tipo_doc_rut(rut) if rut else 'RUT'  # RUT o Pasaporte
+    if emails_map is None:
+        emails_map = {}
 
-        fila = [razon or d['nombre'], 'Compañía', '', dom, ciudad,
+    for ri, d in enumerate(sin_dbid, 2):
+        billing     = get_billing(d['id_dash'], billing_raw, rl)
+        sin_billing = not billing
+        rut         = billing.get('RUT_clean', '')
+        razon       = billing.get('Razón social', '') or billing.get('Nombre', '') or d['nombre']
+        giro        = billing.get('Giro', '')
+        ciudad      = billing.get('Comuna', '')
+        dom         = billing.get('Domicilio', '')
+        # Email: usar billing, luego extracto de mails
+        email       = billing.get('Email', '') or emails_map.get(str(d['id_dash']), '')
+        region      = buscar_region(ciudad, rl)
+        tipo_id     = tipo_doc_rut(rut) if rut else 'RUT'
+        tipo_cont   = 'IVA afecto 1ª categoría'
+
+        # Sin billing → consumidor final con datos por defecto
+        if sin_billing or not rut:
+            rut       = CF_RUT_DISPLAY
+            dom       = CF_DOMICILIO
+            ciudad    = CF_CIUDAD
+            region    = CF_REGION
+            tipo_id   = 'RUT'
+            tipo_cont = CF_TIPO_CONT
+            razon     = razon or d['nombre']
+
+        fila = [razon, 'Compañía', '', dom, ciudad,
                 region, 'Spanish / Español', 'Chile', tipo_id, rut,
-                'IVA afecto 1ª categoría', giro, email, email,
+                tipo_cont, giro, email, email,
                 d['id_dash'], 'Anser Indicus SPA',
                 f"https://dash.fu.do/accounts/{d['id_dash']}"]
 
-        sin_billing = not billing
         for ci, val in enumerate(fila, 1):
             cell = ws.cell(row=ri, column=ci, value=val)
             cell.font      = Font(name='Arial', size=10)
             cell.alignment = Alignment(vertical='center')
-        # Color por estado: naranja si no hay billing, verde si completo, amarillo si falta RUT
-        if sin_billing:
+        # Color: amarillo si es consumidor final por defecto, verde si tiene billing completo
+        if sin_billing or not billing.get('RUT_clean', ''):
             for ci in range(1, len(fila) + 1):
-                ws.cell(ri, ci).fill = orange_fill
-        elif not rut:
-            ws.cell(ri, 10).fill = red_fill  # NIF en rojo si falta RUT
+                ws.cell(ri, ci).fill = yellow_fill
 
     output = io.BytesIO(); wb.save(output); output.seek(0)
     return output.getvalue()
@@ -1496,7 +1552,9 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
     return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar
 
 # ─── Generación Excel de Contactos ───────────────────────────────────────────
-def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl):
+def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl, emails_map=None):
+    if emails_map is None:
+        emails_map = {}
     wb = Workbook()
     cont_headers  = ['Nombre','Tipo de compañía','Empresa relacionada','Nombre de la calle','Ciudad',
                      'Provincia','Idioma','País','Tipo de identificación','NIF','Tipo de contribuyente',
@@ -1522,18 +1580,49 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             id_vistos.add(c['id_cuenta']); casos_dedup.append(c)
 
     for row_idx, c in enumerate(casos_dedup, 2):
-        rut_d    = c['RUT'] if c['RUT'] != 'NO ENCONTRADO' else ''
-        es_caso4 = c.get('rut_ya_existe', False)
-        data = [c['razon_social'],'Compañía','',c['domicilio'],c['comuna'],c['region'],
-                'Spanish / Español','Chile','RUT',rut_d,'IVA afecto 1ª categoría',
-                c['giro'],c['email'],c['email'],c['id_cuenta'],'Anser Indicus SPA',
+        sin_datos_c = (c['RUT'] == 'NO ENCONTRADO' and not c.get('razon_social','').strip()
+                       and not c.get('domicilio','').strip())
+        es_caso4    = c.get('rut_ya_existe', False)
+
+        # Email: usar billing, luego extracto de mails, luego vacío
+        email_c = c.get('email', '') or emails_map.get(str(c['id_cuenta']), '')
+
+        if sin_datos_c:
+            # Sin billing → consumidor final con datos por defecto
+            rut_d    = CF_RUT_DISPLAY
+            dom_d    = CF_DOMICILIO
+            ciudad_d = CF_CIUDAD
+            region_d = CF_REGION
+            tipo_c   = CF_TIPO_CONT
+            nombre_d = c.get('nombre_cuenta', c['id_cuenta'])
+        else:
+            rut_d    = c['RUT'] if c['RUT'] != 'NO ENCONTRADO' else ''
+            dom_d    = c['domicilio']
+            ciudad_d = c['comuna']
+            region_d = c['region']
+            tipo_c   = 'IVA afecto 1ª categoría'
+            nombre_d = c['razon_social']
+
+        data = [nombre_d,'Compañía','',dom_d,ciudad_d,region_d,
+                'Spanish / Español','Chile','RUT',rut_d,tipo_c,
+                c['giro'],email_c,email_c,c['id_cuenta'],'Anser Indicus SPA',
                 f"https://dash.fu.do/accounts/{c['id_cuenta']}"]
         for col_idx, val in enumerate(data, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.font = Font(name='Arial', size=10)
             cell.alignment = Alignment(vertical='center')
-            if es_caso4: cell.fill = yellow_fill
-        if es_caso4:
+            if sin_datos_c:
+                cell.fill = orange_fill   # naranja = consumidor final por defecto
+            elif es_caso4:
+                cell.fill = yellow_fill
+        if sin_datos_c:
+            # Nota aclaratoria
+            cn = ws.cell(row=row_idx, column=18,
+                         value='⚠ Sin datos de facturación → creado como Consumidor Final')
+            cn.font = Font(name='Arial', size=9, color='7F4000')
+            cn.fill = orange_fill
+            cn.alignment = Alignment(vertical='center', wrap_text=True)
+        elif es_caso4:
             nota = (f"⚠ Ya existe otra Referencia en Odoo "
                     f"(Ref: {c.get('ref_existente','?')} | DB_ID: {c.get('db_id_existente','?')}). "
                     f"Verificar si es el mismo cliente.")
@@ -1541,8 +1630,8 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             cn.font = Font(name='Arial', size=9, color='7F6000')
             cn.fill = yellow_fill
             cn.alignment = Alignment(vertical='center', wrap_text=True)
-        # Validación SII
-        com_v = str(c['comuna'] or '').strip()
+        # Validación SII — usar ciudad_d que puede ser el default CF
+        com_v = str(ciudad_d or '').strip()
         if len(com_v) > 20:
             cv = ws.cell(row=row_idx, column=19, value='SUPERA LÍMITE SII')
             cv.fill = PatternFill('solid', start_color='FF0000')
@@ -1551,22 +1640,23 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             ws.cell(row=row_idx, column=5).fill = field_red
             ws.cell(row=row_idx, column=5).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
         else:
-            cv = ws.cell(row=row_idx, column=19, value='OK')
-            cv.fill = green_fill
+            cv = ws.cell(row=row_idx, column=19, value='CF' if sin_datos_c else 'OK')
+            cv.fill = orange_fill if sin_datos_c else green_fill
             cv.font = Font(name='Arial', size=9, color='375623')
             cv.alignment = Alignment(horizontal='center', vertical='center')
-        # Campos críticos vacíos
-        row_data = {'razon_social':c['razon_social'],'domicilio':c['domicilio'],
-                    'comuna':c['comuna'],'region':c['region'],'RUT':c['RUT'],
-                    'giro':c['giro'],'email':c['email']}
-        for col_idx, campo in campos_criticos.items():
-            if es_vacio(row_data.get(campo, '')):
-                ws.cell(row=row_idx, column=col_idx).fill = field_red
-                ws.cell(row=row_idx, column=col_idx).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
+        # Campos críticos — solo si tiene billing real (sin_datos_c ya tiene defaults)
+        if not sin_datos_c:
+            row_data = {'razon_social':c['razon_social'],'domicilio':c['domicilio'],
+                        'comuna':c['comuna'],'region':c['region'],'RUT':c['RUT'],
+                        'giro':c['giro'],'email':c['email']}
+            for col_idx, campo in campos_criticos.items():
+                if es_vacio(row_data.get(campo, '')):
+                    ws.cell(row=row_idx, column=col_idx).fill = field_red
+                    ws.cell(row=row_idx, column=col_idx).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
 
     ws.cell(row=len(casos_dedup)+3, column=1, value='NOTAS:').font = Font(bold=True, name='Arial')
     ws.cell(row=len(casos_dedup)+3, column=2,
-        value='🔴 Fila roja = sin RUT | 🟥 Celda roja = campo vacío | 🟨 Fila amarilla = RUT ya existe | 🔴S = SUPERA LÍMITE SII'
+        value='🟠 Fila naranja = Consumidor Final (sin datos) | 🟥 Celda roja = campo vacío | 🟨 Fila amarilla = RUT ya existe | 🔴S = SUPERA LÍMITE SII'
     ).font = Font(name='Arial', color='CC5500')
 
     # Hoja informativa para casos_act (referencia visual, no importar)
@@ -2333,6 +2423,10 @@ def main():
         f_bil = st.file_uploader(
             "Billing data  *(requerido)*", type=['csv','xlsx'],
             help="billing_data_FECHA.csv exportado de dash.fu.do")
+        f_mails = st.file_uploader(
+            "Extracto de mails  *(opcional)*", type=['csv','xlsx'],
+            help="Archivo con ID de cuenta y email, exportado de dash.fu.do. "
+                 "Se usa para completar el email en contactos sin datos de facturación.")
     with col2:
         f_con = st.file_uploader(
             "Contactos Odoo — res.partner  *(requerido)*", type=['xlsx'],
@@ -2558,6 +2652,20 @@ def main():
             except Exception as e:
                 st.error(f"❌ **Billing data** ({f_bil.name}): {e}"); return
 
+            # ── Cargar extracto de mails (opcional) ───────────────
+            emails_map = {}
+            if f_mails:
+                try:
+                    emails_map = leer_extracto_mails(f_mails)
+                    if emails_map:
+                        st.success(f"✅ Extracto de mails cargado: {len(emails_map)} cuentas.")
+                    else:
+                        st.warning("⚠️ No se encontraron columnas ID/Email en el extracto de mails.")
+                except Exception as e:
+                    st.warning(f"⚠️ No se pudo leer el extracto de mails: {e}")
+            # Guardar en session_state para uso posterior
+            st.session_state['emails_map'] = emails_map
+
             # ── Merge billing manual ──────────────────────────────
             _bm_entries = st.session_state.get('billing_manual', [])
             for _bm in _bm_entries:
@@ -2679,7 +2787,8 @@ def main():
         _excel_cont, _nombre_cont = None, None
         if hay_contactos_nuevos:
             with st.spinner("Generando contactos_nuevos.xlsx..."):
-                _excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl)
+                _excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl,
+                                                       emails_map=st.session_state.get('emails_map', {}))
             _nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
 
         _excel_act, _nombre_act, _partes_act = None, None, []
@@ -3311,7 +3420,10 @@ def main():
             # Generar Excel de contactos sin DB_ID (si hay)
             if sin_dbid_dv:
                 try:
-                    excel_contactos_dv = generar_excel_contactos_dv(sin_dbid_dv, rl_dv)
+                    excel_contactos_dv = generar_excel_contactos_dv(
+                        sin_dbid_dv, billing_raw_dv, rl_dv,
+                        emails_map=st.session_state.get('emails_map', {})
+                    )
                     st.session_state['dv_contactos_excel'] = excel_contactos_dv
                 except Exception as e:
                     st.warning(f"⚠️ No se pudo generar archivo de contactos: {e}")
