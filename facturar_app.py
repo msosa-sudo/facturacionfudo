@@ -1489,23 +1489,36 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
         rut_en_odoo = limpiar_rut(rut_billing) in nif_to_dbid
 
         if ref_en_odoo:
-            if limpiar_rut(rut_billing) == limpiar_rut(rut_odoo):
+            rut_billing_clean = limpiar_rut(rut_billing)
+            rut_odoo_clean    = limpiar_rut(rut_odoo)
+            sin_datos_billing = (rut_billing == 'NO ENCONTRADO' or es_vacio(rut_billing))
+            es_cf_odoo        = (rut_odoo_clean == CF_RUT)
+
+            # Si la Referencia ya existe en Odoo → no crear duplicado
+            # Casos donde se trata como OK (sin duplicar):
+            #   1. RUTs coinciden
+            #   2. La cuenta está en Odoo como consumidor final (CF_RUT) y no hay billing data
+            #   3. La cuenta está en Odoo sin RUT y tampoco hay billing data
+            if (rut_billing_clean == rut_odoo_clean
+                    or (sin_datos_billing and es_cf_odoo)
+                    or (sin_datos_billing and rut_odoo_clean in ('', 'nan'))):
                 casos_ok.append(id_c)
-                datos_odoo   = ref_to_odoo_datos.get(id_c, {})
-                campos_b     = {'razon_social': row['razon_social'], 'giro': row['giro'],
-                                'domicilio': row['domicilio'], 'comuna': row['comuna']}
-                diffs = {}
-                for campo, val_b in campos_b.items():
-                    val_o = datos_odoo.get(campo, '')
-                    if not es_vacio(val_b) and normalizar(val_b) != normalizar(val_o):
-                        diffs[campo] = {'billing': val_b, 'odoo': val_o}
-                if diffs:
-                    casos_dc.append({
-                        'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
-                        'db_id': row['db_id'], 'RUT': rut_billing,
-                        'razon_social': row['razon_social'], 'email': row['email'],
-                        'diffs': diffs
-                    })
+                if not sin_datos_billing:
+                    datos_odoo = ref_to_odoo_datos.get(id_c, {})
+                    campos_b   = {'razon_social': row['razon_social'], 'giro': row['giro'],
+                                  'domicilio': row['domicilio'], 'comuna': row['comuna']}
+                    diffs = {}
+                    for campo, val_b in campos_b.items():
+                        val_o = datos_odoo.get(campo, '')
+                        if not es_vacio(val_b) and normalizar(val_b) != normalizar(val_o):
+                            diffs[campo] = {'billing': val_b, 'odoo': val_o}
+                    if diffs:
+                        casos_dc.append({
+                            'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
+                            'db_id': row['db_id'], 'RUT': rut_billing,
+                            'razon_social': row['razon_social'], 'email': row['email'],
+                            'diffs': diffs
+                        })
             else:
                 base = {
                     'id_cuenta': id_c, 'nombre_cuenta': row['nombre_cuenta'],
@@ -1515,7 +1528,6 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                     'comuna': row['comuna'], 'email': row['email'],
                     'region': buscar_region(row['comuna'], rl)
                 }
-                rut_odoo_clean = limpiar_rut(rut_odoo)
                 if rut_odoo_clean in ('', 'nan'):
                     # Contacto existe en Odoo sin RUT → solo actualizar datos
                     casos_actualizar.append(base)
@@ -1529,7 +1541,7 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                         'comuna': row['comuna'], 'email': row['email'],
                         'region': buscar_region(row['comuna'], rl),
                         'rut_ya_existe': False,
-                        'es_reemplazo': True,  # contacto ya existe en Odoo con otra ref
+                        'es_reemplazo': True,
                     })
         elif rut_en_odoo:
             rut_clean  = limpiar_rut(rut_billing)
