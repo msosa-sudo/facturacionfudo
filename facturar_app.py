@@ -601,14 +601,17 @@ def leer_odoo(f):
 def leer_accounts(f):
     df = pd.read_csv(f, skiprows=3, encoding='utf-8-sig',
                      on_bad_lines='skip', engine='python', quotechar='"')
-    sa, sn = {}, {}
+    sa, sn, id_to_nombre = {}, {}, {}
     for _, r in df.iterrows():
-        n = str(r.get('Nombre', '') or '').strip()
+        n   = str(r.get('Nombre', '') or '').strip()
+        id_ = str(r.get('ID', '') or '').strip()
         if n and n.lower() != 'nan':
             s = re.sub(r'\s+', '', n.lower())
-            sa[s] = str(r['ID']).strip()
+            sa[s] = id_
             sn[s] = n
-    return sa, sn
+        if id_ and id_.lower() not in ('nan', ''):
+            id_to_nombre[id_] = n
+    return sa, sn, id_to_nombre
 
 # ─── Extracto de mails (dash.fu.do → ID → email) ────────────────────────────
 def leer_extracto_mails(f) -> dict:
@@ -813,7 +816,10 @@ def comprobantes_a_df(parsed: list[dict], cols: dict) -> pd.DataFrame:
 
 # ─── Procesamiento principal ──────────────────────────────────────────────────
 def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
-             slug_to_accid, slug_to_nombre, hacer_terminales, hacer_comisiones):
+             slug_to_accid, slug_to_nombre, hacer_terminales, hacer_comisiones,
+             id_to_nombre=None):
+    if id_to_nombre is None:
+        id_to_nombre = {}
     col_desc   = cols['desc']
     col_opid   = cols['opid']
     col_monto  = cols['monto']
@@ -895,7 +901,7 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                 terminos = ''
             rows_comision.append({
                 'id_cuenta': acc_id,
-                'nombre_cuenta': slug_to_nombre.get(slug, acc_id),
+                'nombre_cuenta': slug_to_nombre.get(slug, '') or id_to_nombre.get(str(acc_id), acc_id),
                 'operation_id': opid, 'monto_real': monto_real,
                 'precio_sin_iva': monto_real / 1.19,
                 'RUT_billing': rut_c, 'RUT_odoo': rut_odoo_c,
@@ -1618,7 +1624,9 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             ciudad_d = CF_CIUDAD
             region_d = CF_REGION
             tipo_c   = CF_TIPO_CONT
-            nombre_d = c.get('nombre_cuenta', c['id_cuenta'])
+            # Usar nombre_cuenta solo si es un nombre real (no solo dígitos = ID de cuenta)
+            _nc = str(c.get('nombre_cuenta', '') or '').strip()
+            nombre_d = _nc if (_nc and not _nc.isdigit()) else ''
         else:
             rut_d    = c['RUT'] if c['RUT'] != 'NO ENCONTRADO' else ''
             dom_d    = c['domicilio']
@@ -1641,8 +1649,12 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
                 cell.fill = yellow_fill
         if sin_datos_c:
             # Nota aclaratoria
-            cn = ws.cell(row=row_idx, column=18,
-                         value='⚠ Sin datos de facturación → creado como Consumidor Final')
+            nota_cf = '⚠ Sin datos de facturación → Consumidor Final'
+            if not nombre_d:
+                nota_cf += ' | ⚠ Nombre no encontrado — completar manualmente'
+                ws.cell(row=row_idx, column=1).fill = red_fill
+                ws.cell(row=row_idx, column=1).font = Font(name='Arial', size=10, color='FFFFFF', bold=True)
+            cn = ws.cell(row=row_idx, column=18, value=nota_cf)
             cn.font = Font(name='Arial', size=9, color='7F4000')
             cn.fill = orange_fill
             cn.alignment = Alignment(vertical='center', wrap_text=True)
@@ -2715,10 +2727,10 @@ def main():
             except Exception as e:
                 st.error(f"❌ **Asiento contable** ({f_odo.name}): {e}"); return
             try:
-                slug_to_accid, slug_to_nombre = leer_accounts(f_acc) if f_acc else ({}, {})
+                slug_to_accid, slug_to_nombre, id_to_nombre = leer_accounts(f_acc) if f_acc else ({}, {}, {})
             except Exception as e:
                 st.warning(f"⚠️ **Accounts CSV**: {e} — se continúa sin Deuda fija")
-                slug_to_accid, slug_to_nombre = {}, {}
+                slug_to_accid, slug_to_nombre, id_to_nombre = {}, {}, {}
 
         # ── Procesamiento ────────────────────────────────────────
         with st.spinner("Procesando collection..."):
@@ -2727,6 +2739,7 @@ def main():
                 slug_to_accid, slug_to_nombre,
                 hacer_terminales=proc_term,
                 hacer_comisiones=proc_com,
+                id_to_nombre=id_to_nombre,
             )
             st.session_state['resultado'] = resultado
 
