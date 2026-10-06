@@ -613,29 +613,41 @@ def leer_accounts(f):
 # ─── Extracto de mails (dash.fu.do → ID → email) ────────────────────────────
 def leer_extracto_mails(f) -> dict:
     """
-    Lee el extracto de mails exportado de dash.fu.do.
+    Lee el extracto de mails exportado de dash.fu.do (admin_emails.csv).
+    El archivo tiene una fila de metadatos al inicio; intenta con y sin skiprows=1.
     Devuelve dict {id_cuenta (str) → email (str)}.
-    Busca columnas con 'id' y 'email'/'mail'/'correo' (case-insensitive).
     """
-    try:
-        if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
-            df = pd.read_csv(f, dtype=str)
-        else:
-            df = pd.read_excel(f, dtype=str)
-    except Exception:
+    def _intentar(skip):
+        try:
+            if hasattr(f, 'name') and f.name.lower().endswith('.csv'):
+                df = pd.read_csv(f, dtype=str, skiprows=skip)
+            else:
+                df = pd.read_excel(f, dtype=str, skiprows=skip)
+            f.seek(0)
+        except Exception:
+            try: f.seek(0)
+            except: pass
+            return None
+        df.columns = df.columns.str.strip()
+        # Columna ID: "ID Cuenta", "ID", o cualquiera que contenga "id"
+        col_id = next(
+            (c for c in df.columns if c.strip().lower() in ('id cuenta', 'id')), None
+        ) or next(
+            (c for c in df.columns if 'id' in c.lower()), None
+        )
+        # Columna email
+        col_email = next(
+            (c for c in df.columns if any(k in c.lower() for k in ['email','mail','correo'])),
+            None
+        )
+        if col_id and col_email:
+            return df, col_id, col_email
+        return None
+
+    res = _intentar(0) or _intentar(1)
+    if res is None:
         return {}
-    df.columns = df.columns.str.strip()
-    # Buscar columna ID
-    col_id = next((c for c in df.columns if c.strip().lower() == 'id'), None)
-    if not col_id:
-        col_id = next((c for c in df.columns if 'id' in c.lower()), None)
-    # Buscar columna email
-    col_email = next(
-        (c for c in df.columns if any(k in c.lower() for k in ['email','mail','correo'])),
-        None
-    )
-    if not col_id or not col_email:
-        return {}
+    df, col_id, col_email = res
     result = {}
     for _, r in df.iterrows():
         id_v = str(r.get(col_id, '') or '').strip()
