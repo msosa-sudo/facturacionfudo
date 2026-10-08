@@ -518,6 +518,31 @@ def inferir_tipo_id(nif: str) -> str:
         return 'RUT'
     return 'Pasaporte'
 
+def extraer_calle(dir_completa, nombre=''):
+    """Extrae solo la calle del campo 'Dirección completa' de Odoo.
+    El bloque tiene formato: Nombre\\nCalle\\n\\nCiudad CL-XX\\nChile
+    Elimina líneas vacías, el nombre de la empresa y líneas de ciudad/país.
+    """
+    if not dir_completa or str(dir_completa).strip() in ('', 'nan'):
+        return ''
+    nombre_norm = normalizar(nombre)
+    lines = [l.strip() for l in str(dir_completa).split('\n')]
+    calles = []
+    for line in lines:
+        if not line:
+            continue
+        # Saltar si es el nombre de la empresa
+        if nombre_norm and normalizar(line) == nombre_norm:
+            continue
+        # Saltar si contiene código de región chilena (CL-XX) o es solo "Chile"
+        if re.search(r'\bCL-[A-Z]{2}\b', line, re.IGNORECASE):
+            continue
+        if normalizar(line) in ('chile', ''):
+            continue
+        calles.append(line)
+    return ' '.join(calles).strip()
+
+
 def leer_contactos(f):
     df = pd.read_excel(f, dtype=str)
     df.columns = df.columns.str.strip()
@@ -559,14 +584,23 @@ def leer_contactos(f):
     ref_to_odoo_datos = {}
     ref_to_extra      = {}
 
+    es_dir_completa = col_dom in ('Dirección completa', 'Direccion completa')
+
     for _, r in df.iterrows():
         ref = str(r.get('Referencia', '')).strip()
         if not ref or ref == 'nan':
             continue
-        ref_to_odoo_datos[ref] = {
-            c: str(r.get(co, '') or '').strip()
-            for c, co in _cols_odoo.items() if co and co in df.columns
-        }
+        nombre_r = str(r.get('Nombre', '') or '').strip()
+        datos_row = {}
+        for c, co in _cols_odoo.items():
+            if not co or co not in df.columns:
+                continue
+            val = str(r.get(co, '') or '').strip()
+            # Si el campo domicilio viene de "Dirección completa", extraer solo la calle
+            if c == 'domicilio' and es_dir_completa:
+                val = extraer_calle(val, nombre_r)
+            datos_row[c] = val
+        ref_to_odoo_datos[ref] = datos_row
         nif_raw = str(r.get(col_nif, '') or '').strip()
         ref_to_extra[ref] = {
             'external_id': str(r.get('ID', '') or '').strip(),
