@@ -7,7 +7,7 @@ import io, re, unicodedata, json, base64
 import plotly.express as px
 import plotly.graph_objects as go
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -2210,6 +2210,337 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
     wb.save(output); output.seek(0)
     return output
 
+
+def _nombre_fecha_fact():
+    """Devuelve la fecha de facturación (ayer) en formato d-m-yy sin ceros iniciales."""
+    ayer = date.today() - timedelta(days=1)
+    return f"{ayer.day}-{ayer.month}-{ayer.strftime('%y')}"
+
+
+def generar_excel_terminales_solo(df_work, alertas_monto, alertas_operador, alertas_formato):
+    """Excel con solo la hoja Terminales + Resumen de terminales + Alertas Monto."""
+    fecha_hoy = date.today().strftime('%d/%m/%Y')
+    wb = Workbook()
+
+    # ── Hoja Terminales (idéntica al generar_excel_facturacion) ──────────────
+    fact_headers = ['Orden','Contacto/Id. de la DB','Referencia','Fecha de Factura/Recibo','Fecha vencimiento',
+                    'Referencia de Pago','Diario','Tipo de Documento','Líneas de factura/Producto',
+                    'Líneas de factura/Cuenta','Líneas de factura/Cantidad mínima',
+                    'Líneas de factura/Precio unitario','Líneas de factura/Impuesto',
+                    'Líneas de factura/Descuento (%)']
+    ws1 = wb.active; ws1.title = 'Terminales'
+    aplicar_header(ws1, fact_headers, [8,15,35,22,18,25,20,20,30,38,12,15,30,12])
+
+    orden = 1; prev_opid = None
+    for row_idx, (_, row) in enumerate(df_work.iterrows(), 2):
+        es_primera = row['operation_id'] != prev_opid
+        if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
+        else: orden_val = ''
+        tipo_doc   = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
+        nombre_ref = row['nombre_cuenta'] or row['nombre_billing']
+        contacto_v = row['db_id'] if row['db_id'] != 'ND' else ''
+        if es_primera:
+            data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
+                    fecha_hoy, fecha_hoy, f"'{row['operation_id']}",
+                    'Factura Electrónica', tipo_doc, PROD_TERM, CTA_TERM,
+                    int(row['cantidad']), PRECIO_UNIT, 'IVA 19 Venta', row['descuento']]
+        else:
+            data = ['','','','','','','','', PROD_TERM, CTA_TERM,
+                    int(row['cantidad']), PRECIO_UNIT, 'IVA 19 Venta', row['descuento']]
+        for col_idx, val in enumerate(data, 1):
+            cell = ws1.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = Font(name='Arial', size=10); cell.alignment = Alignment(vertical='center')
+        if row['sin_datos']:
+            for c in range(1, 15): ws1.cell(row=row_idx, column=c).fill = red_fill
+        elif row['db_id'] == 'ND':
+            ws1.cell(row=row_idx, column=2).fill = orange_fill
+        if row['monto_diferente']:
+            ws1.cell(row=row_idx, column=6).fill = yellow_fill
+            ws1.cell(row=row_idx, column=11).fill = yellow_fill
+
+    # ── Alertas Monto ────────────────────────────────────────────────────────
+    if alertas_monto:
+        ws_al = wb.create_sheet('⚠ Alertas Monto')
+        aplicar_header(ws_al,
+            ['Cuenta','ID','Operation ID','Monto esperado','Monto real','Diferencia','Acción'],
+            [30,10,18,16,16,14,45])
+        for row_idx, a in enumerate(alertas_monto, 2):
+            for col_idx, val in enumerate([a['nombre'],a['id_cuenta'],f"'{a['operation_id']}",
+                                           a['monto_esperado'],a['monto_real'],a['diferencia'],
+                                           'Verificar con ejecutivo'], 1):
+                cell = ws_al.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
+                if col_idx in [4,5,6]: cell.number_format = '$#,##0'
+
+    # ── Resumen (solo terminales) ─────────────────────────────────────────────
+    ws_r = wb.create_sheet('Resumen')
+    for col, w in [('A',34),('B',18),('C',16),('D',16),('E',14)]:
+        ws_r.column_dimensions[col].width = w
+    t1 = ws_r.cell(row=1, column=1, value='RESUMEN — TERMINALES')
+    t1.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
+    t1.fill = header_fill; t1.alignment = Alignment(horizontal='center', vertical='center')
+    ws_r.merge_cells('A1:E1'); ws_r.row_dimensions[1].height = 24
+    ws_r.cell(row=2, column=1, value=f"Fecha: {fecha_hoy}").font = Font(italic=True, name='Arial', size=10, color='666666')
+
+    hdr_fill = PatternFill('solid', fgColor='D9D9D9')
+    for col, txt in [(4, 'Según Odoo'), (5, 'Diferencia')]:
+        hc = ws_r.cell(row=3, column=col, value=txt)
+        hc.font = Font(bold=True, name='Arial', size=10)
+        hc.fill = hdr_fill; hc.alignment = Alignment(horizontal='center')
+        hc.border = Border(outline=Side(style='thin'))
+
+    boleta_fill  = PatternFill('solid', fgColor='FFF2CC')
+    factura_fill = PatternFill('solid', fgColor='DDEEFF')
+    section_fill = PatternFill('solid', fgColor='3938A0')
+
+    total_term = calc_total_df(df_work)
+    df_ok_t    = df_work[~df_work['sin_datos']] if not df_work.empty else pd.DataFrame()
+    df_nd_t    = df_work[df_work['sin_datos']]  if not df_work.empty else pd.DataFrame()
+    df_fact_t  = df_ok_t[~df_ok_t['es_consumidor_final']] if not df_ok_t.empty else pd.DataFrame()
+    df_bole_t  = df_ok_t[df_ok_t['es_consumidor_final']]  if not df_ok_t.empty else pd.DataFrame()
+
+    def fr(fila, label, valor, fill, nota='', con_odoo=True):
+        c1 = ws_r.cell(row=fila, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=10); c1.fill = fill
+        c1.alignment = Alignment(vertical='center', horizontal='right')
+        c1.border = Border(outline=Side(style='thin'))
+        c2 = ws_r.cell(row=fila, column=2, value=valor)
+        c2.font = Font(bold=True, name='Arial', size=11, color='1F4E79'); c2.fill = fill
+        c2.number_format = '$#,##0'; c2.alignment = Alignment(horizontal='center', vertical='center')
+        c2.border = Border(outline=Side(style='thin'))
+        if nota:
+            ws_r.cell(row=fila, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+        if con_odoo:
+            cd = ws_r.cell(row=fila, column=4)
+            cd.number_format = '$#,##0'; cd.border = Border(outline=Side(style='medium'))
+            cd.fill = PatternFill('solid', fgColor='FFFDE7')
+            ce = ws_r.cell(row=fila, column=5, value=f'=D{fila}-B{fila}')
+            ce.number_format = '$#,##0'
+            ce.font = Font(name='Arial', size=10, color='CC0000')
+            ce.border = Border(outline=Side(style='thin'))
+
+    def ts(fila, texto):
+        c = ws_r.cell(row=fila, column=1, value=texto)
+        c.font = Font(bold=True, name='Arial', size=11, color='FFFFFF')
+        c.fill = section_fill; c.alignment = Alignment(horizontal='center', vertical='center')
+        ws_r.merge_cells(f'A{fila}:E{fila}'); ws_r.row_dimensions[fila].height = 18
+
+    fr(4, 'TOTAL TERMINALES (con IVA)', total_term, total_fill, con_odoo=False)
+    ts(5, 'TERMINALES')
+    n_fact_t = df_fact_t['operation_id'].nunique() if not df_fact_t.empty else 0
+    n_bole_t = df_bole_t['operation_id'].nunique() if not df_bole_t.empty else 0
+    fr(6, 'Facturas Electrónicas', calc_total_df(df_fact_t), factura_fill,
+       f'→ {n_fact_t} factura(s)' if n_fact_t else '')
+    fr(7, 'Boletas Electrónicas',  calc_total_df(df_bole_t), boleta_fill,
+       f'→ {n_bole_t} boleta(s)'  if n_bole_t else '')
+    fila_det = 8
+    if not df_nd_t.empty:
+        fr(8, 'Sin datos (billing)', calc_total_df(df_nd_t), red_fill,
+           f'→ {df_nd_t["operation_id"].nunique()} entrada(s)', con_odoo=False)
+        fila_det = 9
+        # detalle sin datos
+        ws_r.cell(row=fila_det, column=1, value='Cuentas sin datos:').font = Font(bold=True, name='Arial', size=10, color='CC0000')
+        fila_det += 1
+        seen_nd = set()
+        for _, row in df_nd_t.iterrows():
+            opid = row['operation_id']
+            if opid in seen_nd: continue
+            seen_nd.add(opid)
+            op_rows_nd = df_nd_t[df_nd_t['operation_id'] == opid]
+            nombre_nd = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+            c1 = ws_r.cell(row=fila_det, column=1, value=f"• {nombre_nd} (ID {row['id_cuenta']})")
+            c1.font = Font(name='Arial', size=10); c1.fill = red_fill
+            c2 = ws_r.cell(row=fila_det, column=2, value=calc_total_df(op_rows_nd))
+            c2.font = Font(name='Arial', size=10); c2.fill = red_fill; c2.number_format = '$#,##0'
+            fila_det += 1
+        fila_det += 1
+
+    # Detalle por fecha
+    if not df_work.empty:
+        ws_r.cell(row=fila_det, column=1, value='Detalle por fecha:').font = Font(bold=True, name='Arial', size=11, color='1F4E79')
+        fila_det += 1
+        df_det = df_work.copy()
+        df_det['_fecha_dt'] = df_det['fecha_compra'].apply(parse_fecha_dt)
+        df_det = df_det.sort_values('_fecha_dt')
+        for fecha_str, grupo_fecha in df_det.groupby('fecha_compra', sort=False):
+            total_fecha = calc_total_df(grupo_fecha)
+            c_fh = ws_r.cell(row=fila_det, column=1, value=f'📅 {fecha_str}')
+            c_fh.font = Font(bold=True, name='Arial', size=11, color='FFFFFF'); c_fh.fill = header_fill
+            c_fh.alignment = Alignment(vertical='center')
+            c_fv = ws_r.cell(row=fila_det, column=2, value=total_fecha)
+            c_fv.font = Font(bold=True, name='Arial', size=11, color='FFFFFF'); c_fv.fill = header_fill
+            c_fv.number_format = '$#,##0'; c_fv.alignment = Alignment(horizontal='center', vertical='center')
+            ws_r.cell(row=fila_det, column=3).fill = header_fill
+            ws_r.row_dimensions[fila_det].height = 20; fila_det += 1
+            seen_op = set()
+            for _, row in grupo_fecha.iterrows():
+                opid = row['operation_id']
+                if opid in seen_op: continue
+                seen_op.add(opid)
+                op_rows = grupo_fecha[grupo_fecha['operation_id'] == opid]
+                nombre = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+                row_fill = red_fill if row['sin_datos'] else PatternFill('solid', start_color='FFFFFF')
+                ws_r.cell(row=fila_det, column=1, value=row['fecha_compra']).font = Font(name='Arial', size=10)
+                ws_r.cell(row=fila_det, column=1).fill = row_fill
+                ws_r.cell(row=fila_det, column=2, value=f'Terminales - {nombre}').font = Font(name='Arial', size=10)
+                ws_r.cell(row=fila_det, column=2).fill = row_fill
+                c3 = ws_r.cell(row=fila_det, column=3, value=calc_total_df(op_rows))
+                c3.font = Font(name='Arial', size=10); c3.fill = row_fill; c3.number_format = '$#,##0'
+                fila_det += 1
+            fila_det += 1
+        fila_det += 1
+
+    if alertas_operador:
+        ws_r.cell(row=fila_det, column=1,
+            value=f'⚠ {len(alertas_operador)} pagos sin referencia:').font = Font(bold=True, name='Arial', size=10, color='CC5500')
+        fila_det += 1
+        for a in alertas_operador:
+            for col, val in enumerate([a['fecha'],a['operador'],a['descripcion'],a['monto'],f"'{a['operation_id']}"], 1):
+                cell = ws_r.cell(row=fila_det, column=col, value=val)
+                cell.font = Font(name='Arial', size=9); cell.fill = PatternFill('solid', start_color='FFF2CC')
+                if col == 4: cell.number_format = '$#,##0'
+            fila_det += 1
+        fila_det += 1
+
+    if alertas_formato:
+        ws_r.cell(row=fila_det, column=1,
+            value=f'⚠ {len(alertas_formato)} filas con formato no reconocido:').font = Font(bold=True, name='Arial', size=10, color='CC5500')
+        fila_det += 1
+        for a in alertas_formato:
+            for col, val in enumerate([a['fecha'],a['descripcion'],a['extref'],a['monto'],f"'{a['operation_id']}"], 1):
+                cell = ws_r.cell(row=fila_det, column=col, value=val)
+                cell.font = Font(name='Arial', size=9); cell.fill = PatternFill('solid', start_color='FFF2CC')
+                if col == 4: cell.number_format = '$#,##0'
+            fila_det += 1
+
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out
+
+
+def generar_excel_comisiones_solo(rows_comision, comisiones_sin_cuenta):
+    """Excel con solo la hoja Comisiones DF + Resumen de comisiones."""
+    if not rows_comision and not comisiones_sin_cuenta:
+        return None
+    fecha_hoy = date.today().strftime('%d/%m/%Y')
+    wb = Workbook()
+    csc = comisiones_sin_cuenta or []
+
+    # ── Hoja Comisiones ──────────────────────────────────────────────────────
+    if rows_comision:
+        ws_com = wb.active; ws_com.title = 'Comisiones'
+        com_headers = ['Orden','Contacto/Id. de la DB','Referencia',
+                       'Fecha de Factura/Recibo','Fecha vencimiento','Referencia de Pago',
+                       'Términos y condiciones','Diario','Tipo de Documento',
+                       'Líneas de factura/Producto','Líneas de factura/Cuenta',
+                       'Líneas de factura/Cantidad mínima','Líneas de factura/Precio unitario',
+                       'Líneas de factura/Impuesto','Líneas de factura/Descuento (%)']
+        aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
+        for row_idx, rc in enumerate(rows_comision, 2):
+            tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
+            nombre_ref_c = rc['nombre_cuenta'] or rc['nombre_billing']
+            data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
+                      nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
+                      rc['terminos'], 'Factura Electrónica', tipo_doc_c,
+                      PROD_COM, CTA_COM, 1, rc['precio_sin_iva'], 'IVA 19 Venta', 0]
+            for col_idx, val in enumerate(data_c, 1):
+                cell = ws_com.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.alignment = Alignment(vertical='center')
+            if rc['sin_datos']:
+                for c in range(1, 16): ws_com.cell(row=row_idx, column=c).fill = red_fill
+            elif rc['db_id'] == 'ND':
+                ws_com.cell(row=row_idx, column=2).fill = orange_fill
+    else:
+        # Workbook necesita al menos una hoja activa
+        ws_com = wb.active; ws_com.title = 'Comisiones'
+
+    # ── Hoja Comisiones sin cuenta ────────────────────────────────────────────
+    if csc:
+        ws_ce = wb.create_sheet('⚠ Comisiones sin cuenta')
+        aplicar_header(ws_ce,
+            ['External Reference','Slug extraído','Operation ID','Monto','Fecha','Acción'],
+            [35,25,20,14,14,45])
+        for row_idx, e in enumerate(csc, 2):
+            for col_idx, val in enumerate([e['extref'],e['slug'],f"'{e['operation_id']}",
+                                           e['monto'],e['fecha'],
+                                           "No se encontró cuenta en accounts.csv — verificar manual"], 1):
+                cell = ws_ce.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10); cell.fill = red_fill
+                cell.alignment = Alignment(vertical='center', wrap_text=True)
+            ws_ce.row_dimensions[row_idx].height = 30
+
+    # ── Resumen (solo comisiones) ─────────────────────────────────────────────
+    ws_r = wb.create_sheet('Resumen')
+    for col, w in [('A',34),('B',18),('C',16),('D',16),('E',14)]:
+        ws_r.column_dimensions[col].width = w
+    t1 = ws_r.cell(row=1, column=1, value='RESUMEN — DEUDA FIJA')
+    t1.font = Font(bold=True, name='Arial', size=13, color='FFFFFF')
+    t1.fill = header_fill; t1.alignment = Alignment(horizontal='center', vertical='center')
+    ws_r.merge_cells('A1:E1'); ws_r.row_dimensions[1].height = 24
+    ws_r.cell(row=2, column=1, value=f"Fecha: {fecha_hoy}").font = Font(italic=True, name='Arial', size=10, color='666666')
+
+    hdr_fill = PatternFill('solid', fgColor='D9D9D9')
+    for col, txt in [(4, 'Según Odoo'), (5, 'Diferencia')]:
+        hc = ws_r.cell(row=3, column=col, value=txt)
+        hc.font = Font(bold=True, name='Arial', size=10)
+        hc.fill = hdr_fill; hc.alignment = Alignment(horizontal='center')
+        hc.border = Border(outline=Side(style='thin'))
+
+    boleta_fill  = PatternFill('solid', fgColor='FFF2CC')
+    factura_fill = PatternFill('solid', fgColor='DDEEFF')
+    section_fill = PatternFill('solid', fgColor='3938A0')
+
+    total_com = round(sum(r['monto_real'] for r in rows_comision)) if rows_comision else 0
+    com_ok    = [r for r in rows_comision if not r['sin_datos']]
+    com_fact  = [r for r in com_ok if not r.get('es_consumidor_final', False)]
+    com_bole  = [r for r in com_ok if r.get('es_consumidor_final', False)]
+    com_nd    = [r for r in rows_comision if r['sin_datos']]
+
+    def fr(fila, label, valor, fill, nota='', con_odoo=True):
+        c1 = ws_r.cell(row=fila, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=10); c1.fill = fill
+        c1.alignment = Alignment(vertical='center', horizontal='right')
+        c1.border = Border(outline=Side(style='thin'))
+        c2 = ws_r.cell(row=fila, column=2, value=valor)
+        c2.font = Font(bold=True, name='Arial', size=11, color='1F4E79'); c2.fill = fill
+        c2.number_format = '$#,##0'; c2.alignment = Alignment(horizontal='center', vertical='center')
+        c2.border = Border(outline=Side(style='thin'))
+        if nota:
+            ws_r.cell(row=fila, column=3, value=nota).font = Font(italic=True, name='Arial', size=9, color='444444')
+        if con_odoo:
+            cd = ws_r.cell(row=fila, column=4)
+            cd.number_format = '$#,##0'; cd.border = Border(outline=Side(style='medium'))
+            cd.fill = PatternFill('solid', fgColor='FFFDE7')
+            ce = ws_r.cell(row=fila, column=5, value=f'=D{fila}-B{fila}')
+            ce.number_format = '$#,##0'
+            ce.font = Font(name='Arial', size=10, color='CC0000')
+            ce.border = Border(outline=Side(style='thin'))
+
+    def ts(fila, texto):
+        c = ws_r.cell(row=fila, column=1, value=texto)
+        c.font = Font(bold=True, name='Arial', size=11, color='FFFFFF')
+        c.fill = section_fill; c.alignment = Alignment(horizontal='center', vertical='center')
+        ws_r.merge_cells(f'A{fila}:E{fila}'); ws_r.row_dimensions[fila].height = 18
+
+    fr(4, 'TOTAL DEUDA FIJA (con IVA)', total_com, total_fill, con_odoo=False)
+    ts(5, 'COMISIONES / DEUDA FIJA')
+    fr(6, 'Facturas Electrónicas', round(sum(r['monto_real'] for r in com_fact)), factura_fill,
+       f'→ {len(com_fact)} factura(s)' if com_fact else '')
+    fr(7, 'Boletas Electrónicas',  round(sum(r['monto_real'] for r in com_bole)), boleta_fill,
+       f'→ {len(com_bole)} boleta(s)'  if com_bole else '')
+    fila_det = 8
+    if com_nd:
+        fr(8, 'Sin datos (billing)', round(sum(r['monto_real'] for r in com_nd)), red_fill,
+           f'→ {len(com_nd)} entrada(s)', con_odoo=False)
+        fila_det = 9
+    if csc:
+        ws_r.cell(row=fila_det, column=1,
+            value=f'⚠ {len(csc)} comisión(es) sin cuenta resuelta — ver hoja ⚠ Comisiones sin cuenta'
+        ).font = Font(bold=True, name='Arial', size=10, color='CC0000')
+
+    out = io.BytesIO(); wb.save(out); out.seek(0)
+    return out
+
+
 # ─── Auditoría ────────────────────────────────────────────────────────────────
 def run_auditoria(df_c, cols, ids_facturados_real):
     """
@@ -2880,21 +3211,25 @@ def main():
             if _n_faltantes > 10:
                 _faltantes_lista += f"\n- ... y {_n_faltantes - 10} más"
 
-        _excel_fact, _nombre_fact = None, None
+        _excel_fact_term, _nombre_fact_term = None, None
+        _excel_fact_com,  _nombre_fact_com  = None, None
         _sin_filas = df_work.empty and not rows_comision and not csc
         if not es_paso1 and not hay_contactos_nuevos and not _sin_filas:
+            _fecha_str = _nombre_fecha_fact()   # d-m-yy de ayer
             empty_cols = ['id_cuenta','cantidad','descuento','nombre_cuenta','operation_id',
                           'monto','RUT_billing','RUT_odoo','razon_social','nombre_billing',
                           'giro','domicilio','comuna','email','db_id','contacto_nombre',
                           'monto_diferente','sin_datos','es_consumidor_final','fecha_compra']
-            with st.spinner("Generando Excel de facturación..."):
-                _excel_fact = generar_excel_facturacion(
-                    df_work if not df_work.empty else pd.DataFrame(columns=empty_cols),
-                    rows_comision if hacer_comisiones else [],
-                    alertas_monto, alertas_op, alertas_fmt,
-                    comisiones_sin_cuenta=csc,
-                )
-            _nombre_fact = f"facturar_terminales_{date.today().strftime('%Y%m%d')}.xlsx"
+            _df_term = df_work if not df_work.empty else pd.DataFrame(columns=empty_cols)
+            with st.spinner("Generando Excel de terminales..."):
+                _excel_fact_term = generar_excel_terminales_solo(
+                    _df_term, alertas_monto, alertas_op, alertas_fmt)
+            _nombre_fact_term = f"Facturación de terminales al {_fecha_str}.xlsx"
+            _rows_com = rows_comision if hacer_comisiones else []
+            if _rows_com or csc:
+                with st.spinner("Generando Excel de deuda fija..."):
+                    _excel_fact_com = generar_excel_comisiones_solo(_rows_com, csc)
+                _nombre_fact_com = f"Facturación de DF al {_fecha_str}.xlsx"
 
         # Guardar todo en session_state para que persista al descargar archivos
         st.session_state['_paso12_state'] = {
@@ -2913,7 +3248,8 @@ def main():
             # descargas
             'excel_cont': _excel_cont, 'nombre_cont': _nombre_cont, 'n_crear': len(casos_crear),
             'excel_act': _excel_act, 'nombre_act': _nombre_act, 'partes_act': _partes_act,
-            'excel_fact': _excel_fact, 'nombre_fact': _nombre_fact,
+            'excel_fact_term': _excel_fact_term, 'nombre_fact_term': _nombre_fact_term,
+            'excel_fact_com':  _excel_fact_com,  'nombre_fact_com':  _nombre_fact_com,
             'faltantes_lista': _faltantes_lista, 'n_faltantes': _n_faltantes,
             'f_con_name': f_con.name if f_con else '',
         }
@@ -3005,16 +3341,29 @@ def main():
         elif _s['sin_filas']:
             with dl_col2:
                 st.info("No hay filas para facturar en este collection.")
-        elif _s['excel_fact']:
-            with dl_col2:
+        else:
+            # ── Dos botones independientes: terminales y comisiones ──
+            if _s.get('excel_fact_term'):
+                with dl_col2:
+                    st.download_button(
+                        label=f"🧾 {_s['nombre_fact_term']}",
+                        data=_s['excel_fact_term'],
+                        file_name=_s['nombre_fact_term'],
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        type="primary",
+                        help="Terminales — importar en Odoo para crear facturas",
+                        key="dl_fact_term",
+                    )
+            if _s.get('excel_fact_com'):
                 st.download_button(
-                    label=f"🧾 {_s['nombre_fact']}",
-                    data=_s['excel_fact'],
-                    file_name=_s['nombre_fact'],
+                    label=f"📋 {_s['nombre_fact_com']}",
+                    data=_s['excel_fact_com'],
+                    file_name=_s['nombre_fact_com'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    type="primary",
-                    help="Importar en Odoo para crear las facturas"
+                    help="Deuda Fija / Comisiones — importar en Odoo para crear facturas",
+                    key="dl_fact_com",
                 )
 
         st.success("✅ Procesamiento completado")
