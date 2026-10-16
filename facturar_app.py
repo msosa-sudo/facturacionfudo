@@ -285,6 +285,64 @@ tr:hover td { background-color: #F0F0FA !important; }
     border-color: #5F5FC4 !important;
     box-shadow: 0 0 0 2px rgba(95,95,196,0.15) !important;
 }
+
+/* ═══════════════════════════════════════════════════════
+   SIDEBAR NAV — radio → nav items estilo mockup
+═══════════════════════════════════════════════════════ */
+
+/* Ocultar el label "¿Qué vas a hacer?" del radio (lo manejamos con st.markdown) */
+[data-testid="stSidebar"] [data-testid="stRadio"] > [data-testid="stWidgetLabel"] {
+    display: none !important;
+}
+
+/* Contenedor de opciones: columna con gap */
+[data-testid="stSidebar"] [data-testid="stRadio"] > div[role="radiogroup"] {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+}
+
+/* Cada opción → bloque clickeable */
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+    display: flex !important;
+    align-items: center !important;
+    width: 100% !important;
+    padding: 9px 12px !important;
+    border-radius: 8px !important;
+    cursor: pointer !important;
+    font-weight: 500 !important;
+    color: #3B3B3B !important;
+    font-size: 13px !important;
+    transition: background 0.15s, color 0.15s !important;
+    margin-bottom: 0 !important;
+    line-height: 1.35 !important;
+}
+
+/* Hover */
+[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+    background: #DCDCF0 !important;
+    color: #3938A0 !important;
+}
+
+/* Seleccionado — azul Fudo, texto blanco */
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+    background: #3938A0 !important;
+    color: #FFFFFF !important;
+    font-weight: 600 !important;
+}
+
+/* Ocultar el círculo del radio */
+[data-testid="stSidebar"] [data-testid="stRadio"] label > div:first-child {
+    display: none !important;
+}
+
+/* Separadores opcionales entre grupos de nav */
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-child(4),
+[data-testid="stSidebar"] [data-testid="stRadio"] label[data-baseweb="radio"]:nth-child(6) {
+    margin-top: 6px !important;
+    border-top: 1px solid #DCDCF0 !important;
+    padding-top: 12px !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
