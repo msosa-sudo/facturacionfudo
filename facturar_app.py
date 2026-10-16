@@ -324,15 +324,21 @@ tr:hover td { background-color: #F0F0FA !important; }
     color: #3938A0 !important;
 }
 
-/* Seleccionado — azul Fudo, texto blanco */
-[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+/* Seleccionado — azul Fudo, texto blanco (todos los hijos) */
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked),
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p,
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span,
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) div {
     background: #3938A0 !important;
     color: #FFFFFF !important;
     font-weight: 600 !important;
 }
 
-/* Ocultar el círculo del radio */
-[data-testid="stSidebar"] [data-testid="stRadio"] label > div:first-child {
+/* Ocultar el círculo del radio — selector amplio */
+[data-testid="stSidebar"] [data-testid="stRadio"] [data-testid="stMarkdownContainer"] ~ div,
+[data-testid="stSidebar"] [data-testid="stRadio"] label > div:first-child,
+[data-testid="stSidebar"] [data-testid="stRadio"] label input[type="radio"],
+[data-testid="stSidebar"] [data-testid="stRadio"] label [data-baseweb="radio"] {
     display: none !important;
 }
 
