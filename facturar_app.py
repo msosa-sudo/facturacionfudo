@@ -562,11 +562,25 @@ def _leer_collection_nuevo(df_raw):
     df['_desc'] = df.apply(_build_desc, axis=1)
     df[C_OPID]  = df[C_OPID].astype(str).str.strip()
 
+    # Normalizar fecha: ISO "2026-10-21T20:37:48.000-04:00" → "21/10/2026"
+    def _normalizar_fecha(v):
+        s = str(v or '').strip()
+        if not s or s == 'nan':
+            return ''
+        # Tomar solo la parte de la fecha (antes de T o espacio)
+        s = s.split('T')[0].split(' ')[0]
+        try:
+            dt = pd.to_datetime(s, dayfirst=False)
+            return dt.strftime('%d/%m/%Y')
+        except Exception:
+            return s
+    df['_fecha'] = df[C_FECHA].apply(_normalizar_fecha)
+
     cols = {
         'desc':   '_desc',
         'opid':   C_OPID,
         'monto':  '_monto_neto',
-        'fecha':  C_FECHA,
+        'fecha':  '_fecha',
         'op':     '',       # no existe en este formato; mask_op quedará en False
         'extref': C_NUMID,  # admin@slug y TFP:id:... quedan aquí para resolución
     }
