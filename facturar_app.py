@@ -602,8 +602,20 @@ def leer_collection(f):
     df_c.columns = df_c.iloc[0]
     df_c = df_c[1:].reset_index(drop=True)
 
-    # ── Auto-detección: formato nuevo MP (MP_CL-FECHA.xlsx) ──────────────────
+    # ── Auto-detección: formato nuevo MP (MP_CL-FECHA.xlsx / CSV inglés) ─────
     if 'NÚMERO DE IDENTIFICACIÓN' in df_c.columns:
+        return _leer_collection_nuevo(df_c)
+
+    # Variante CSV en inglés: mismas columnas pero nombres en inglés
+    if 'EXTERNAL_REFERENCE' in df_c.columns and 'SOURCE_ID' in df_c.columns:
+        df_c = df_c.rename(columns={
+            'EXTERNAL_REFERENCE':  'NÚMERO DE IDENTIFICACIÓN',
+            'SOURCE_ID':           'ID DE OPERACIÓN EN MERCADO PAGO',
+            'TRANSACTION_AMOUNT':  'VALOR DE LA COMPRA',
+            'FEE_AMOUNT':          'COMISIONES + IVA',
+            'SALE_DETAIL':         'DETALLE DE LA VENTA',
+            'TRANSACTION_DATE':    'FECHA DE ORIGEN',
+        })
         return _leer_collection_nuevo(df_c)
 
     # ── Formato clásico ───────────────────────────────────────────────────────
