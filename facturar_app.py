@@ -523,6 +523,57 @@ def get_ref_string(row, col_desc, col_extref, tiene_extref):
     return None
 
 # ─── Cargadores de datos ──────────────────────────────────────────────────────
+def _leer_collection_nuevo(df_raw):
+    """Parser para el formato nuevo de MP (MP_CL-FECHA.xlsx).
+    Columnas: NÚMERO DE IDENTIFICACIÓN, DETALLE DE LA VENTA,
+              ID DE OPERACIÓN EN MERCADO PAGO, VALOR DE LA COMPRA,
+              COMISIONES + IVA, FECHA DE ORIGEN.
+    Auto-detectado cuando NÚMERO DE IDENTIFICACIÓN está en las columnas.
+    """
+    C_NUMID   = 'NÚMERO DE IDENTIFICACIÓN'
+    C_DETALLE = 'DETALLE DE LA VENTA'
+    C_OPID    = 'ID DE OPERACIÓN EN MERCADO PAGO'
+    C_MONTO   = 'VALOR DE LA COMPRA'
+    C_COM     = 'COMISIONES + IVA'
+    C_FECHA   = 'FECHA DE ORIGEN'
+
+    required = [C_NUMID, C_DETALLE, C_OPID, C_MONTO]
+    missing  = [c for c in required if c not in df_raw.columns]
+    if missing:
+        raise ValueError(f"Columnas faltantes en collection (formato nuevo): {', '.join(missing)}")
+
+    df = df_raw.copy()
+
+    # Monto neto = VALOR DE LA COMPRA − COMISIONES + IVA
+    monto_bruto = pd.to_numeric(df[C_MONTO], errors='coerce').fillna(0)
+    comisiones  = pd.to_numeric(df.get(C_COM, 0), errors='coerce').fillna(0) if C_COM in df.columns else 0
+    df['_monto_neto'] = monto_bruto - comisiones
+
+    # Columna _desc: para terminales usamos NÚMERO DE IDENTIFICACIÓN (TFP:...)
+    # para el resto usamos DETALLE DE LA VENTA limpio
+    def _build_desc(row):
+        num_id  = str(row.get(C_NUMID,  '') or '').strip()
+        detalle = str(row.get(C_DETALLE, '') or '').strip().strip('"').strip()
+        if num_id.startswith('TFP:'):
+            return num_id   # detectado por startswith('TFP:') en procesar()
+        if num_id.startswith('admin@') or '::' in num_id:
+            return detalle  # "Deuda por comisiones" → detectado por contains()
+        return detalle
+
+    df['_desc'] = df.apply(_build_desc, axis=1)
+    df[C_OPID]  = df[C_OPID].astype(str).str.strip()
+
+    cols = {
+        'desc':   '_desc',
+        'opid':   C_OPID,
+        'monto':  '_monto_neto',
+        'fecha':  C_FECHA,
+        'op':     '',       # no existe en este formato; mask_op quedará en False
+        'extref': C_NUMID,  # admin@slug y TFP:id:... quedan aquí para resolución
+    }
+    return df, cols
+
+
 def leer_collection(f):
     try:
         if f.name.lower().endswith('.csv'):
@@ -537,6 +588,12 @@ def leer_collection(f):
         df_c = pd.read_excel(f, header=None, engine='openpyxl')
     df_c.columns = df_c.iloc[0]
     df_c = df_c[1:].reset_index(drop=True)
+
+    # ── Auto-detección: formato nuevo MP (MP_CL-FECHA.xlsx) ──────────────────
+    if 'NÚMERO DE IDENTIFICACIÓN' in df_c.columns:
+        return _leer_collection_nuevo(df_c)
+
+    # ── Formato clásico ───────────────────────────────────────────────────────
     col_desc   = 'Descripción de la operación (reason)'
     col_opid   = 'Número de operación de Mercado Pago (operation_id)'
     col_monto  = 'Valor del producto (transaction_amount)'
@@ -2884,7 +2941,8 @@ def main():
     with col1:
         f_col = st.file_uploader(
             "Collection Mercado Pago  *(requerido)*", type=['xlsx','csv'],
-            help="collection-FECHA.xlsx exportado de Mercado Pago")
+            help="Formato nuevo: MP_CL-FECHA.xlsx (Reportes → se genera automáticamente). "
+                 "Formato clásico: collection-FECHA.csv. Ambos son reconocidos automáticamente.")
         f_bil = st.file_uploader(
             "Billing data  *(requerido)*", type=['csv','xlsx'],
             help="billing_data_FECHA.csv exportado de dash.fu.do")
@@ -3757,6 +3815,22 @@ def main():
                 key='dv_contactos'
             )
 
+        dv_col1b, dv_col2b = st.columns(2)
+        with dv_col1b:
+            f_dv_billing = st.file_uploader(
+                "Billing data  *(requerido si hay cuentas nuevas)*",
+                type=['csv', 'xlsx'],
+                help="billing_data_FECHA.csv de dash.fu.do — necesario para crear contactos nuevos en Odoo",
+                key='dv_billing'
+            )
+        with dv_col2b:
+            f_dv_mails = st.file_uploader(
+                "Extracto de mails  *(opcional)*",
+                type=['csv'],
+                help="admin_emails de dash.fu.do — para completar emails de cuentas sin billing",
+                key='dv_mails'
+            )
+
         # Selector de fecha de factura
         hoy = date.today()
         dv_col3, dv_col4 = st.columns(2)
@@ -3798,6 +3872,22 @@ def main():
                     filas_dv = leer_extracto_dv(f_dv_ext.read())
                 except Exception as e:
                     st.error(f"❌ **Extracto DV** ({f_dv_ext.name}): {e}"); return
+
+            # Leer billing data (opcional, necesario para contactos nuevos)
+            billing_raw_dv = {}
+            if f_dv_billing:
+                try:
+                    billing_raw_dv = leer_billing(f_dv_billing)
+                except Exception as e:
+                    st.warning(f"⚠️ Billing data no se pudo leer ({f_dv_billing.name}): {e}")
+
+            # Leer extracto de mails (opcional)
+            emails_dv = {}
+            if f_dv_mails:
+                try:
+                    emails_dv = leer_extracto_mails(f_dv_mails)
+                except Exception as e:
+                    st.warning(f"⚠️ Extracto de mails no se pudo leer ({f_dv_mails.name}): {e}")
 
             with st.spinner("Leyendo contactos Odoo..."):
                 try:
@@ -3904,9 +3994,15 @@ def main():
             # Generar Excel de contactos sin DB_ID (si hay)
             if sin_dbid_dv:
                 try:
+                    if not billing_raw_dv:
+                        st.warning(
+                            "⚠️ Hay cuentas nuevas pero no se cargó **Billing data** — "
+                            "los contactos se generarán sin datos de RUT/dirección. "
+                            "Subí el billing_data para obtener un archivo completo."
+                        )
                     excel_contactos_dv = generar_excel_contactos_dv(
                         sin_dbid_dv, billing_raw_dv, rl_dv,
-                        emails_map=st.session_state.get('emails_map', {})
+                        emails_map=emails_dv or st.session_state.get('emails_map', {})
                     )
                     st.session_state['dv_contactos_excel'] = excel_contactos_dv
                 except Exception as e:
