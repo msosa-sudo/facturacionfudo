@@ -544,10 +544,9 @@ def _leer_collection_nuevo(df_raw):
 
     df = df_raw.copy()
 
-    # Monto neto = VALOR DE LA COMPRA − COMISIONES + IVA
-    monto_bruto = pd.to_numeric(df[C_MONTO], errors='coerce').fillna(0)
-    comisiones  = pd.to_numeric(df.get(C_COM, 0), errors='coerce').fillna(0) if C_COM in df.columns else 0
-    df['_monto_neto'] = monto_bruto - comisiones
+    # Monto = VALOR DE LA COMPRA directamente (lo que el cliente pagó, con IVA incluido)
+    # Las COMISIONES + IVA son el costo de MP para Fudo — no se suman al monto a facturar
+    df['_monto_neto'] = pd.to_numeric(df[C_MONTO], errors='coerce').fillna(0)
 
     # Columna _desc: para terminales usamos NÚMERO DE IDENTIFICACIÓN (TFP:...)
     # para el resto usamos DETALLE DE LA VENTA limpio
