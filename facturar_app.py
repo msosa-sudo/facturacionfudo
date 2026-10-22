@@ -2899,11 +2899,10 @@ def main():
             "📋  PASO 1 — Crear contactos",
             "🧾  PASO 2 — Facturar",
             "🔍  PASO 3 — Auditoría",
-            "🖥️  Hardware",
             "📄  Deuda Viva",
-            "📊  Reportes",
             "📖  Guía de uso",
         ], label_visibility="collapsed")
+        # "🖥️  Hardware" y "📊  Reportes" ocultos de la UI (código intacto)
 
         es_paso1 = "PASO 1" in paso
         es_hw    = "Hardware" in paso
