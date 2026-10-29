@@ -517,9 +517,9 @@ def parse_tfp(s):
 def get_ref_string(row, col_desc, col_extref, tiene_extref):
     if tiene_extref:
         v = str(row.get(col_extref, '') or '').strip()
-        if v.startswith(('Terminal:', 'TFP:')): return v
+        if v.startswith(('Terminal:', 'TFP:', 'TNOM:')): return v
     v = str(row.get(col_desc, '') or '').strip().strip('"')
-    if v.startswith(('Terminal:', 'TFP:')): return v
+    if v.startswith(('Terminal:', 'TFP:', 'TNOM:')): return v
     return None
 
 # ─── Cargadores de datos ──────────────────────────────────────────────────────
@@ -557,6 +557,10 @@ def _leer_collection_nuevo(df_raw):
             return num_id   # detectado por startswith('TFP:') en procesar()
         if num_id.startswith('admin@') or '::' in num_id:
             return detalle  # "Deuda por comisiones" → detectado por contains()
+        # Nuevo formato MP: "Terminales Fudo — Nombre del negocio"
+        m = re.search(r'Terminales\s+\w+\s*[—–-]\s*(.+)$', detalle)
+        if m:
+            return f'TNOM:{m.group(1).strip()}'
         return detalle
 
     df['_desc'] = df.apply(_build_desc, axis=1)
@@ -840,6 +844,42 @@ def leer_extracto_mails(f) -> dict:
     return result
 
 
+# ─── Motorcito Billing — generador de HTML ────────────────────────────────────
+def generar_html_motorcito_billing(ids_nombres: dict) -> bytes:
+    """
+    Genera el HTML del motorcito de Billing Motor con los IDs de cuentas pre-cargados.
+    ids_nombres: dict {id_cuenta (str) -> nombre (str)}
+    Retorna bytes del HTML.
+    """
+    from pathlib import Path
+    import json as _json
+
+    ids_list    = [str(k) for k in ids_nombres.keys()]
+    nombres_map = {str(k): str(v) for k, v in ids_nombres.items()}
+    ids_json     = _json.dumps(ids_list,    ensure_ascii=False)
+    nombres_json = _json.dumps(nombres_map, ensure_ascii=False)
+
+    # Leer el template del motorcito (mismo directorio que este script)
+    template_path = Path(__file__).parent / 'motorcito_billing.html'
+    if template_path.exists():
+        html = template_path.read_text(encoding='utf-8')
+    else:
+        # Fallback: generar un HTML mínimo con los IDs embebidos
+        html = _MOTORCITO_TEMPLATE_MINIMO
+
+    # Reemplazar los placeholders
+    html = html.replace(
+        'var IDS_PRECARGADOS_HTML = []; /* __IDS_JSON_HTML__ */',
+        f'var IDS_PRECARGADOS_HTML = {ids_json};'
+    )
+    html = html.replace(
+        'var NOMBRES_PRECARGADOS_HTML = {}; /* __NOMBRES_JSON_HTML__ */',
+        f'var NOMBRES_PRECARGADOS_HTML = {nombres_json};'
+    )
+
+    return html.encode('utf-8')
+
+
 # ─── Billing manual (pegar desde dash.fu.do) ─────────────────────────────────
 def parsear_billing_manual(texto: str, override_id: str = '') -> dict | None:
     """
@@ -1013,9 +1053,16 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
     nif_to_dbid  = refs['nif_to_dbid']
     ref_to_nombre = refs['ref_to_nombre']
 
+    # Índice reverso: nombre normalizado → account_id (para formato TNOM:)
+    billing_nombre_idx = {}
+    for _bid, _bdata in billing_raw.items():
+        _nm = normalizar(str(_bdata.get('Nombre', '') or ''))
+        if _nm and _bid not in billing_nombre_idx:
+            billing_nombre_idx[_nm] = _bid
+
     # Máscaras
-    mask_reason  = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:'))
-    mask_extref  = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:'))
+    mask_reason  = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
+    mask_extref  = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
                     if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op      = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                     else pd.Series([False]*len(df_c), index=df_c.index))
@@ -1125,6 +1172,13 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         elif ref_str.startswith('TFP:'):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas: continue
+        elif ref_str.startswith('TNOM:'):
+            # Nuevo formato MP: "Terminales Fudo — Nombre del negocio"
+            nombre = ref_str[5:].strip()
+            id_c   = billing_nombre_idx.get(normalizar(nombre), nombre)
+            # Calcular qty a partir del monto real (cada terminal vale PRECIO_UNIT * 1.19)
+            qty_calc = max(1, round(monto_real / (PRECIO_UNIT * 1.19)))
+            lineas = [{'qty': qty_calc, 'desc': 0.0}]
         else:
             continue
 
@@ -2080,7 +2134,7 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
         if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
         else: orden_val = ''
         tipo_doc    = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
-        nombre_ref  = row['nombre_cuenta'] or row['nombre_billing']
+        nombre_ref  = row['nombre_billing'] or row['nombre_cuenta']
         contacto_v  = row['db_id'] if row['db_id'] != 'ND' else ''
         if es_primera:
             data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
@@ -2113,7 +2167,7 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
         aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
         for row_idx, rc in enumerate(rows_comision, 2):
             tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
-            nombre_ref_c = rc['nombre_cuenta'] or rc['nombre_billing']
+            nombre_ref_c = rc['nombre_billing'] or rc['nombre_cuenta']
             data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
                       nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
                       rc['terminos'], 'Factura Electrónica', tipo_doc_c,
@@ -2383,7 +2437,7 @@ def generar_excel_terminales_solo(df_work, alertas_monto, alertas_operador, aler
         if es_primera: orden_val = orden; orden += 1; prev_opid = row['operation_id']
         else: orden_val = ''
         tipo_doc   = 'Boleta Electrónica' if row['es_consumidor_final'] else 'Factura Electrónica'
-        nombre_ref = row['nombre_cuenta'] or row['nombre_billing']
+        nombre_ref = row['nombre_billing'] or row['nombre_cuenta']
         contacto_v = row['db_id'] if row['db_id'] != 'ND' else ''
         if es_primera:
             data = [orden_val, contacto_v, f"Terminales - {nombre_ref}",
@@ -2583,7 +2637,7 @@ def generar_excel_comisiones_solo(rows_comision, comisiones_sin_cuenta):
         aplicar_header(ws_com, com_headers, [8,15,32,22,18,25,25,20,20,22,35,12,20,15,12])
         for row_idx, rc in enumerate(rows_comision, 2):
             tipo_doc_c   = 'Boleta Electrónica' if rc['es_consumidor_final'] else 'Factura Electrónica'
-            nombre_ref_c = rc['nombre_cuenta'] or rc['nombre_billing']
+            nombre_ref_c = rc['nombre_billing'] or rc['nombre_cuenta']
             data_c = ['', rc['db_id'] if rc['db_id'] != 'ND' else '',
                       nombre_ref_c, fecha_hoy, fecha_hoy, f"'{rc['operation_id']}",
                       rc['terminos'], 'Factura Electrónica', tipo_doc_c,
@@ -2702,8 +2756,8 @@ def run_auditoria(df_c, cols, ids_facturados_real):
     col_extref = cols['extref']
     tiene_extref = col_extref in df_c.columns
 
-    mask_reason   = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:'))
-    mask_extref   = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:'))
+    mask_reason   = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
+    mask_extref   = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
                      if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op       = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                      else pd.Series([False]*len(df_c), index=df_c.index))
@@ -2770,6 +2824,10 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas:
                 continue
+        elif ref_str.startswith('TNOM:'):
+            nombre = ref_str[5:].strip()
+            id_c   = nombre
+            lineas = [{'qty': 1, 'desc': 0.0}]
         else:
             continue
 
@@ -3026,6 +3084,32 @@ def main():
                     f"→ **[{_bm_nombre or _bm_id}](https://dash.fu.do/accounts/{_bm_id})**"
                     f" `ID: {_bm_id}`"
                 )
+
+            # ── Motorcito: generar HTML con IDs pre-cargados ──
+            st.caption("**Motorcito:** descargá el extractor automático para obtener los datos de estas cuentas desde dash.fu.do.")
+            _col_motor1, _col_motor2 = st.columns([3, 5])
+            with _col_motor1:
+                try:
+                    _html_motorcito = generar_html_motorcito_billing(_pendientes)
+                    st.download_button(
+                        label="🔧 Generar motorcito de billing",
+                        data=_html_motorcito,
+                        file_name="motorcito_billing.html",
+                        mime="text/html",
+                        help="Descargá este HTML, abrilo en el navegador y arrastrá el favorito a Chrome. Luego usalo estando en dash.fu.do para extraer los datos de las cuentas pendientes.",
+                        use_container_width=True,
+                    )
+                except Exception as _e_motor:
+                    st.error(f"❌ No se pudo generar el motorcito: {_e_motor}")
+            with _col_motor2:
+                st.caption(
+                    "1. Descargá y abrí el HTML → arrastrá el favorito a Chrome  \n"
+                    "2. Andá a dash.fu.do → hacé clic en el favorito  \n"
+                    "3. Los IDs ya están cargados → hacé clic en **Iniciar**  \n"
+                    "4. En cada cuenta, volvé a hacer clic → extrae y pasa a la siguiente  \n"
+                    "5. Al terminar descarga `billing_suplementario.csv` → subilo acá como Billing Data"
+                )
+
             st.divider()
 
         with st.form("form_billing_manual", clear_on_submit=True):
