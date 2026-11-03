@@ -514,12 +514,14 @@ def parse_tfp(s):
         except (ValueError, IndexError): pass
     return id_c, nombre, [{'qty': q, 'desc': d} for d, q in sorted(ld.items())]
 
+_REF_PREFIXES = ('Terminal:', 'TFP:', 'TNOM:', 'TFID:')
+
 def get_ref_string(row, col_desc, col_extref, tiene_extref):
     if tiene_extref:
         v = str(row.get(col_extref, '') or '').strip()
-        if v.startswith(('Terminal:', 'TFP:', 'TNOM:')): return v
+        if v.startswith(_REF_PREFIXES): return v
     v = str(row.get(col_desc, '') or '').strip().strip('"')
-    if v.startswith(('Terminal:', 'TFP:', 'TNOM:')): return v
+    if v.startswith(_REF_PREFIXES): return v
     return None
 
 # ─── Cargadores de datos ──────────────────────────────────────────────────────
@@ -554,13 +556,21 @@ def _leer_collection_nuevo(df_raw):
         num_id  = str(row.get(C_NUMID,  '') or '').strip()
         detalle = str(row.get(C_DETALLE, '') or '').strip().strip('"').strip()
         if num_id.startswith('TFP:'):
-            return num_id   # detectado por startswith('TFP:') en procesar()
+            return num_id   # formato clásico TFP
         if num_id.startswith('admin@') or '::' in num_id:
-            return detalle  # "Deuda por comisiones" → detectado por contains()
-        # Nuevo formato MP: "Terminales Fudo — Nombre del negocio"
-        m = re.search(r'Terminales\s+\w+\s*[—–-]\s*(.+)$', detalle)
-        if m:
-            return f'TNOM:{m.group(1).strip()}'
+            return detalle  # comisiones → detectado por contains()
+        # Nuevo formato MP: FUDO-{account_id}-{device_id}
+        _m_fudo = re.match(r'^FUDO-(\d+)-\d+$', num_id)
+        if _m_fudo:
+            _acc_id = _m_fudo.group(1)
+            # Nombre de cuenta desde DETALLE: """Compra Nombre cuenta"""
+            _dm = re.match(r'^Compra\s+(.+)$', detalle, re.IGNORECASE)
+            _nombre = _dm.group(1).strip() if _dm else ''
+            return f'TFID:{_acc_id}:{_nombre}'
+        # Formato "Terminales Fudo — Nombre del negocio"
+        _m_tnom = re.search(r'Terminales\s+\w+\s*[—–-]\s*(.+)$', detalle)
+        if _m_tnom:
+            return f'TNOM:{_m_tnom.group(1).strip()}'
         return detalle
 
     df['_desc'] = df.apply(_build_desc, axis=1)
@@ -1061,8 +1071,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             billing_nombre_idx[_nm] = _bid
 
     # Máscaras
-    mask_reason  = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
-    mask_extref  = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
+    mask_reason  = df_c[col_desc].astype(str).str.startswith(_REF_PREFIXES)
+    mask_extref  = (df_c[col_extref].astype(str).str.startswith(_REF_PREFIXES)
                     if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op      = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                     else pd.Series([False]*len(df_c), index=df_c.index))
@@ -1172,11 +1182,17 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         elif ref_str.startswith('TFP:'):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas: continue
+        elif ref_str.startswith('TFID:'):
+            # Nuevo formato MP: FUDO-{account_id}-{device_id}
+            _parts = ref_str[5:].split(':', 1)
+            id_c   = _parts[0].strip()
+            nombre = _parts[1].strip() if len(_parts) > 1 else ''
+            qty_calc = max(1, round(monto_real / (PRECIO_UNIT * 1.19)))
+            lineas = [{'qty': qty_calc, 'desc': 0.0}]
         elif ref_str.startswith('TNOM:'):
-            # Nuevo formato MP: "Terminales Fudo — Nombre del negocio"
+            # Formato "Terminales Fudo — Nombre del negocio"
             nombre = ref_str[5:].strip()
             id_c   = billing_nombre_idx.get(normalizar(nombre), nombre)
-            # Calcular qty a partir del monto real (cada terminal vale PRECIO_UNIT * 1.19)
             qty_calc = max(1, round(monto_real / (PRECIO_UNIT * 1.19)))
             lineas = [{'qty': qty_calc, 'desc': 0.0}]
         else:
@@ -2756,8 +2772,8 @@ def run_auditoria(df_c, cols, ids_facturados_real):
     col_extref = cols['extref']
     tiene_extref = col_extref in df_c.columns
 
-    mask_reason   = df_c[col_desc].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
-    mask_extref   = (df_c[col_extref].astype(str).str.startswith(('Terminal:', 'TFP:', 'TNOM:'))
+    mask_reason   = df_c[col_desc].astype(str).str.startswith(_REF_PREFIXES)
+    mask_extref   = (df_c[col_extref].astype(str).str.startswith(_REF_PREFIXES)
                      if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op       = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                      else pd.Series([False]*len(df_c), index=df_c.index))
@@ -2824,6 +2840,11 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas:
                 continue
+        elif ref_str.startswith('TFID:'):
+            _parts = ref_str[5:].split(':', 1)
+            id_c   = _parts[0].strip()
+            nombre = _parts[1].strip() if len(_parts) > 1 else ''
+            lineas = [{'qty': 1, 'desc': 0.0}]
         elif ref_str.startswith('TNOM:'):
             nombre = ref_str[5:].strip()
             id_c   = nombre
