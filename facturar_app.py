@@ -1135,11 +1135,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                 rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
                 db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
             nombre_td  = billing_c.get('Nombre', '') or id_to_nombre.get(str(acc_id), acc_id)
-            try:
-                _dt = datetime.strptime(fecha_c, '%d/%m/%Y')
-                terminos = f"{MESES_ES[_dt.month]} {_dt.year} - TD"
-            except Exception:
-                terminos = ''
+            _hoy = date.today()
+            terminos = f"{MESES_ES[_hoy.month]} {_hoy.year} - TD"
             rows_comision.append({
                 'id_cuenta': acc_id,
                 'nombre_cuenta': id_to_nombre.get(str(acc_id), acc_id),
@@ -1188,11 +1185,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             if not db_id_c:
                 rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
                 db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
-            try:
-                _dt = datetime.strptime(fecha_c, '%d/%m/%Y')
-                terminos = f"{MESES_ES[_dt.month]} {_dt.year} - DF"
-            except Exception:
-                terminos = ''
+            _hoy = date.today()
+            terminos = f"{MESES_ES[_hoy.month]} {_hoy.year} - DF"
             rows_comision.append({
                 'id_cuenta': acc_id,
                 'nombre_cuenta': slug_to_nombre.get(slug, '') or id_to_nombre.get(str(acc_id), acc_id),
