@@ -2933,6 +2933,95 @@ def generar_excel_auditoria(filas, periodo=''):
     return output
 
 
+# ─── Session-state: persistencia de archivos subidos ─────────────────────────
+_SS_PREFIX = '_ss_file_'
+
+_ROLES_LABELS = {
+    'col':      'Collection MP',
+    'bil':      'Billing data',
+    'mails':    'Extracto mails',
+    'con':      'Contactos Odoo',
+    'odo':      'Asiento contable Odoo',
+    'acc':      'Accounts CSV',
+    'dv_ext_p1':'Deuda Viva (extracto)',
+}
+
+def _ss_guardar_archivo(role: str, f):
+    if f is None: return
+    try: b = f.read(); f.seek(0)
+    except Exception: return
+    st.session_state[_SS_PREFIX + role] = {'name': f.name, 'data': b}
+
+def _ss_obtener_archivo(role: str):
+    d = st.session_state.get(_SS_PREFIX + role)
+    if not d: return None
+    buf = io.BytesIO(d['data']); buf.name = d['name']; return buf
+
+def _ss_limpiar_archivo(role: str):
+    st.session_state.pop(_SS_PREFIX + role, None)
+
+def _uploader(role, label, types, help=None, key=None):
+    """Uploader con persistencia: muestra archivo guardado o widget normal."""
+    stored = _ss_obtener_archivo(role)
+    if stored:
+        col_a, col_b = st.columns([8, 1])
+        col_a.markdown(f"**{label}**")
+        col_a.success(f"✅ {stored.name}")
+        if col_b.button("🗑️", key=f'_clr_{role}', help="Quitar archivo"):
+            _ss_limpiar_archivo(role)
+            st.rerun()
+        return stored
+    widget_key = key or f'_up_{role}'
+    f = st.file_uploader(label, type=types, help=help, key=widget_key)
+    if f:
+        _ss_guardar_archivo(role, f)
+    return f
+
+def _detectar_rol_archivo(f) -> str | None:
+    """Detecta el rol de un archivo subido por nombre y columnas."""
+    name = f.name.lower()
+    # Por nombre de archivo (más confiable)
+    if 'billing_data' in name or 'billing data' in name:
+        return 'bil'
+    if 'mp_cl-' in name or (name.startswith('mp_') and name.endswith(('.xlsx', '.csv'))):
+        return 'col'
+    if name.startswith('collection') or 'collection-' in name:
+        return 'col'
+    if 'accounts_' in name and name.endswith('.csv'):
+        return 'acc'
+    if 'res.partner' in name or ('contacto' in name and name.endswith('.xlsx')):
+        return 'con'
+    if 'asiento' in name or 'journal_items' in name or 'account_move' in name:
+        return 'odo'
+    if 'mail' in name and ('extract' in name or 'correo' in name or name.endswith('.csv')):
+        return 'mails'
+    if 'deuda_viva' in name or 'dv_ext' in name:
+        return 'dv_ext_p1'
+    # Por columnas del archivo
+    try:
+        f.seek(0)
+        if name.endswith('.csv'):
+            cols_str = f.read(3000).decode('utf-8', errors='replace').split('\n')[0].lower()
+            f.seek(0)
+        else:
+            _df = pd.read_excel(io.BytesIO(f.read()), nrows=0, engine='calamine')
+            f.seek(0)
+            cols_str = ','.join(c.lower() for c in _df.columns)
+        if 'número de identificación' in cols_str or 'id de operación en mercado pago' in cols_str:
+            return 'col'
+        if 'razón social' in cols_str and 'giro' in cols_str and 'domicilio' in cols_str:
+            return 'bil'
+        if 'nif' in cols_str and ('calle' in cols_str or 'street' in cols_str or 'city' in cols_str):
+            return 'con'
+        if 'must_be' in cols_str or ('referencia de pago' in cols_str and 'diario' in cols_str):
+            return 'odo'
+        if 'codigo' in cols_str and 'slug' in cols_str and 'region' in cols_str:
+            return 'acc'
+    except Exception:
+        pass
+    return None
+
+
 # ─── UI Principal ─────────────────────────────────────────────────────────────
 def main():
     if not check_access():
@@ -3017,44 +3106,68 @@ def main():
         _render_guia()
         return
 
+    # ── Carga rápida ───────────────────────────────────────────
+    with st.expander("⚡ Carga rápida — seleccioná todos los archivos de una vez", expanded=False):
+        st.caption("Seleccioná todos los archivos juntos. El procesador detecta automáticamente qué es cada uno.")
+        _archivos_rapidos = st.file_uploader(
+            "Seleccionar archivos", type=['xlsx', 'csv'],
+            accept_multiple_files=True, key='_carga_rapida',
+            label_visibility='collapsed'
+        )
+        if _archivos_rapidos:
+            _detectados, _no_detectados = {}, []
+            for _f in _archivos_rapidos:
+                _rol = _detectar_rol_archivo(_f)
+                if _rol:
+                    _ss_guardar_archivo(_rol, _f)
+                    _detectados[_rol] = _f.name
+                else:
+                    _no_detectados.append(_f.name)
+            for _rol, _nom in _detectados.items():
+                st.success(f"✅ **{_ROLES_LABELS.get(_rol, _rol)}**: {_nom}")
+            for _nom in _no_detectados:
+                st.warning(f"⚠️ No se pudo detectar el rol de: **{_nom}** — subilo manualmente abajo")
+            if _detectados:
+                st.rerun()
+
     # ── File uploaders ──────────────────────────────────────────
     st.subheader("📁 Archivos requeridos")
     col1, col2 = st.columns(2)
     with col1:
-        f_col = st.file_uploader(
-            "Collection Mercado Pago  *(requerido)*", type=['xlsx','csv'],
+        f_col = _uploader(
+            'col', "Collection Mercado Pago  *(requerido)*", ['xlsx','csv'],
             help="Formato nuevo: MP_CL-FECHA.xlsx (Reportes → se genera automáticamente). "
                  "Formato clásico: collection-FECHA.csv. Ambos son reconocidos automáticamente.")
-        f_bil = st.file_uploader(
-            "Billing data  *(requerido)*", type=['csv','xlsx'],
+        f_bil = _uploader(
+            'bil', "Billing data  *(requerido)*", ['csv','xlsx'],
             help="billing_data_FECHA.csv exportado de dash.fu.do")
-        f_mails = st.file_uploader(
-            "Extracto de mails  *(opcional)*", type=['csv','xlsx'],
+        f_mails = _uploader(
+            'mails', "Extracto de mails  *(opcional)*", ['csv','xlsx'],
             help="Archivo con ID de cuenta y email, exportado de dash.fu.do. "
                  "Se usa para completar el email en contactos sin datos de facturación.")
     with col2:
-        f_con = st.file_uploader(
-            "Contactos Odoo — res.partner  *(requerido)*", type=['xlsx'],
+        f_con = _uploader(
+            'con', "Contactos Odoo — res.partner  *(requerido)*", ['xlsx'],
             help="Exportación del modelo res.partner desde Odoo")
-        f_odo = st.file_uploader(
-            "Asiento contable Odoo  *(requerido)*", type=['xlsx'],
+        f_odo = _uploader(
+            'odo', "Asiento contable Odoo  *(requerido)*", ['xlsx'],
             help="Para detectar facturas ya procesadas y evitar duplicados")
 
     f_acc = None
     if proc_com:
         st.subheader("📁 Adicional para Deuda fija")
-        f_acc = st.file_uploader(
-            "Accounts CSV  *(necesario para Deuda fija)*", type=['csv'],
+        f_acc = _uploader(
+            'acc', "Accounts CSV  *(necesario para Deuda fija)*", ['csv'],
             help="accounts_FECHA.csv exportado de dash.fu.do")
 
     f_dv_ext_p1 = None
     if es_paso1 and not es_guia:
         st.subheader("📁 Adicional para Deuda Viva *(opcional)*")
-        f_dv_ext_p1 = st.file_uploader(
+        f_dv_ext_p1 = _uploader(
+            'dv_ext_p1',
             "Extracto Deuda Viva  *(opcional — para incluir contactos DV nuevos)*",
-            type=['xlsx'],
-            help="Si subís este archivo, el PASO 1 detecta qué cuentas DV no están en Odoo y las agrega al archivo de contactos",
-            key='p1_dv_extracto'
+            ['xlsx'],
+            help="Si subís este archivo, el PASO 1 detecta qué cuentas DV no están en Odoo y las agrega al archivo de contactos"
         )
 
     # ── Billing manual (cuentas sin Billing Data) ───────────────
