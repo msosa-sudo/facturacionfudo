@@ -2991,7 +2991,7 @@ def _detectar_rol_archivo(f) -> str | None:
         return 'acc'
     if 'res.partner' in name or ('contacto' in name and name.endswith('.xlsx')):
         return 'con'
-    if 'asiento' in name or 'journal_items' in name or 'account_move' in name:
+    if 'asiento' in name or 'journal_items' in name or 'account_move' in name or 'facturas' in name:
         return 'odo'
     if 'mail' in name and ('extract' in name or 'correo' in name or name.endswith('.csv')):
         return 'mails'
@@ -3007,15 +3007,15 @@ def _detectar_rol_archivo(f) -> str | None:
             _df = pd.read_excel(io.BytesIO(f.read()), nrows=0, engine='calamine')
             f.seek(0)
             cols_str = ','.join(c.lower() for c in _df.columns)
-        if 'número de identificación' in cols_str or 'id de operación en mercado pago' in cols_str:
+        if 'id de operación en mercado pago' in cols_str or 'detalle de la venta' in cols_str:
             return 'col'
         if 'razón social' in cols_str and 'giro' in cols_str and 'domicilio' in cols_str:
             return 'bil'
-        if 'nif' in cols_str and ('calle' in cols_str or 'street' in cols_str or 'city' in cols_str):
+        if 'número de identificación' in cols_str and 'dirección completa' in cols_str:
             return 'con'
-        if 'must_be' in cols_str or ('referencia de pago' in cols_str and 'diario' in cols_str):
+        if 'must_be' in cols_str or 'referencia de pago' in cols_str:
             return 'odo'
-        if 'codigo' in cols_str and 'slug' in cols_str and 'region' in cols_str:
+        if 'módulos en el plan' in cols_str:
             return 'acc'
     except Exception:
         pass
@@ -3127,8 +3127,6 @@ def main():
                 st.success(f"✅ **{_ROLES_LABELS.get(_rol, _rol)}**: {_nom}")
             for _nom in _no_detectados:
                 st.warning(f"⚠️ No se pudo detectar el rol de: **{_nom}** — subilo manualmente abajo")
-            if _detectados:
-                st.rerun()
 
     # ── File uploaders ──────────────────────────────────────────
     st.subheader("📁 Archivos requeridos")
