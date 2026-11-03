@@ -805,12 +805,18 @@ def leer_accounts(f):
     sa, sn, id_to_nombre = {}, {}, {}
     for _, r in df.iterrows():
         n   = str(r.get('Nombre', '') or '').strip()
-        id_ = str(r.get('ID', '') or '').strip()
+        id_raw = str(r.get('ID', '') or '').strip()
+        # El CSV puede leer IDs como float (ej. "151344.0") — normalizar a entero
+        if id_raw and id_raw.lower() not in ('nan', ''):
+            try: id_ = str(int(float(id_raw)))
+            except (ValueError, OverflowError): id_ = id_raw
+        else:
+            id_ = ''
         if n and n.lower() != 'nan':
             s = re.sub(r'\s+', '', n.lower())
             sa[s] = id_
             sn[s] = n
-        if id_ and id_.lower() not in ('nan', ''):
+        if id_:
             id_to_nombre[id_] = n
     return sa, sn, id_to_nombre
 
@@ -3011,12 +3017,12 @@ def _card(icon, titulo, cuerpo, color_borde='#3938A0', color_fondo='#F5F5FF'):
 
 def _guia_paso1():
     _card('📋', 'PASO 1 — Crear contactos en Odoo',
-        '<b>¿Para qué sirve?</b> Antes de facturar, Odoo necesita tener registradas todas las cuentas '
-        'que cobraron en Mercado Pago. Este paso detecta cuáles son nuevas y genera el archivo para importarlas.<br><br>'
+        '<b>¿Para qué sirve?</b> Para poder facturar, necesitamos tener actualizados los contactos en Odoo. '
+        'Este paso detecta qué cuentas son nuevas (no están en Odoo todavía) y genera el archivo para importarlas.<br><br>'
         '<b>Flujo:</b><br>'
         '① Subís los archivos de abajo ② Hacés clic en <i>Procesar</i> '
         '③ Descargás el Excel de contactos ④ Lo importás en Odoo (<i>Contactos → Importar registros</i>) '
-        '⑤ Exportás el <b>res.partner</b> actualizado desde Odoo '
+        '⑤ Exportás los contactos actualizados desde Odoo (plantilla <b>"Clientes - AISpA"</b>) '
         '⑥ Volvés aquí, elegís <b>PASO 2</b> y subís ese archivo.<br><br>'
         '<b>💡 Tip:</b> Si el procesador no genera archivo de contactos, todas las cuentas ya están en Odoo — podés ir directo al PASO 2.',
         color_borde='#3938A0', color_fondo='#F5F5FF')
@@ -3035,31 +3041,33 @@ def _guia_archivos(es_paso1, proc_com):
     with st.expander('📖 ¿Para qué sirve cada archivo?', expanded=False):
         _items = [
             ('📥', 'Collection Mercado Pago', '#3938A0',
-             'El reporte de cobros del período, exportado desde el portal de Mercado Pago. '
-             'Contiene cada pago recibido con el ID de operación, monto y fecha. '
+             'El reporte de <b>todas las transacciones del período</b> que se va a facturar, exportado desde el portal de Mercado Pago. '
+             'Incluye terminales (TFP:), deuda fija (admin@slug), suscripciones Tu Delivery (id::fee_payment) '
+             'y transacciones de clientes (FUDO-id-device, estas se ignoran automáticamente). '
              '<b>Dónde bajarlo:</b> MP → Reportes → Liquidaciones → Exportar (formato MP_CL-FECHA.xlsx).'),
             ('🧾', 'Billing data', '#3938A0',
              'Los datos de facturación (RUT, razón social, giro, dirección) de cada cuenta. '
-             '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Billing data → Exportar. '
+             '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → País → Chile → Exportar. '
              'Las cuentas sin este dato se facturan como <i>Consumidor Final</i>.'),
             ('📬', 'Extracto de mails', '#6B6BA8',
              '<i>Opcional.</i> Archivo con el email de cada cuenta. Se usa para completar el campo de correo '
              'en contactos nuevos que no tienen datos de facturación completos. '
              '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Mails.'),
-            ('👥', 'Contactos Odoo — res.partner', '#3938A0',
-             'La exportación del modelo de contactos de Odoo. El procesador lo usa para cruzar '
-             'qué cuentas de MP ya existen en Odoo (por RUT o ID) y cuáles son nuevas. '
-             '<b>Dónde bajarlo:</b> Odoo → Contactos → Exportar → seleccioná res.partner.'),
+            ('👥', 'Contactos Odoo', '#3938A0',
+             'La exportación de contactos de Odoo (<b>Anser Indicus SPA</b>). El procesador lo usa para obtener el ID '
+             'de cada cliente y evitar crear duplicados. '
+             '<b>Dónde bajarlo:</b> Odoo → Anser Indicus SPA → Clientes → seleccioná todos → '
+             'descargá la plantilla <b>"Clientes - AISpA"</b>.'),
             ('📒', 'Asiento contable Odoo', '#3938A0',
-             'El listado de facturas ya emitidas en Odoo. El procesador lo usa para evitar '
-             'facturar dos veces la misma operación de MP. '
+             'El listado de facturas ya emitidas en Odoo del mes que están por facturar. '
+             'El procesador lo usa para evitar facturar dos veces la misma operación de MP. '
              '<b>Dónde bajarlo:</b> Odoo → Facturación → Facturas de clientes → Exportar.'),
         ]
         if proc_com:
             _items.append(('🗂️', 'Accounts CSV', '#E07B00',
-                'Necesario solo cuando facturás <b>Deuda fija</b>. Contiene el listado de cuentas '
-                'con su plan, estado y slug, que el procesador usa para identificar las deudas fijas. '
-                '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Accounts → Exportar.'))
+                'Necesario solo cuando facturás <b>Deuda fija o Tu Delivery</b>. Viene en el mismo zip '
+                'donde descargás el Billing data. Contiene el listado completo de cuentas con su ID, '
+                'nombre y plan — el procesador lo usa para identificar a qué cuenta pertenece cada comisión.'))
         if es_paso1:
             _items.append(('📊', 'Extracto Deuda Viva', '#1A7A4A',
                 '<i>Opcional en PASO 1.</i> Si lo subís, el procesador detecta también qué cuentas '
