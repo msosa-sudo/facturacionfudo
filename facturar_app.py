@@ -514,7 +514,10 @@ def parse_tfp(s):
         except (ValueError, IndexError): pass
     return id_c, nombre, [{'qty': q, 'desc': d} for d, q in sorted(ld.items())]
 
-_REF_PREFIXES = ('Terminal:', 'TFP:', 'TNOM:', 'TFID:')
+_REF_PREFIXES = ('Terminal:', 'TFP:', 'TNOM:')
+# Patrón FUDO-{id}-{device}: son transacciones de compra de clientes a través del dispositivo,
+# NO suscripciones de terminales — deben ignorarse silenciosamente.
+_FUDO_COMPRA_RE = re.compile(r'^FUDO-\d+-\d+$')
 
 def get_ref_string(row, col_desc, col_extref, tiene_extref):
     if tiene_extref:
@@ -556,17 +559,21 @@ def _leer_collection_nuevo(df_raw):
         num_id  = str(row.get(C_NUMID,  '') or '').strip()
         detalle = str(row.get(C_DETALLE, '') or '').strip().strip('"').strip()
         if num_id.startswith('TFP:'):
-            return num_id   # formato clásico TFP
-        if num_id.startswith('admin@') or '::' in num_id:
-            return detalle  # comisiones → detectado por contains()
-        # Nuevo formato MP: FUDO-{account_id}-{device_id}
-        _m_fudo = re.match(r'^FUDO-(\d+)-\d+$', num_id)
-        if _m_fudo:
-            _acc_id = _m_fudo.group(1)
-            # Nombre de cuenta desde DETALLE: """Compra Nombre cuenta"""
-            _dm = re.match(r'^Compra\s+(.+)$', detalle, re.IGNORECASE)
-            _nombre = _dm.group(1).strip() if _dm else ''
-            return f'TFID:{_acc_id}:{_nombre}'
+            # Nombre de cuenta viene de DETALLE: "Terminales Fudo — Nombre cuenta"
+            # El último segmento del TFP: es el código de device (ej. NVOVB), no el nombre.
+            _m_tnom = re.search(r'Terminales\s+\w+\s*[—–-]\s*(.+)$', detalle)
+            if _m_tnom:
+                nombre_cuenta = _m_tnom.group(1).strip()
+                return re.sub(r':[^:]+$', f':{nombre_cuenta}', num_id)
+            return num_id
+        if num_id.startswith('admin@'):
+            return detalle  # DF comisiones → detectado por contains()
+        if '::' in num_id:
+            return '__TD_SUSCRIPCION__'  # Suscripción Tu Delivery
+        # FUDO-{account_id}-{device_id}: transacción de compra de cliente a través del
+        # dispositivo Fudo — NO es una suscripción de terminal, se ignora silenciosamente.
+        if re.match(r'^FUDO-\d+-\d+$', num_id):
+            return '__FUDO_COMPRA__'
         # Formato "Terminales Fudo — Nombre del negocio"
         _m_tnom = re.search(r'Terminales\s+\w+\s*[—–-]\s*(.+)$', detalle)
         if _m_tnom:
@@ -1077,8 +1084,9 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
     mask_op      = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                     else pd.Series([False]*len(df_c), index=df_c.index))
     mask_comision = df_c[col_desc].astype(str).str.contains(
-        'Deuda por comisiones|Suscripción de Tu Delivery|Comisiones TuDelivery', na=False)
-    df_term = df_c[mask_reason | mask_extref | mask_op | mask_comision].copy().reset_index(drop=True)
+        'Deuda por comisiones|Comisiones TuDelivery', na=False)
+    mask_td = df_c[col_desc].astype(str) == '__TD_SUSCRIPCION__'
+    df_term = df_c[mask_reason | mask_extref | mask_op | mask_comision | mask_td].copy().reset_index(drop=True)
 
     rows, rows_comision = [], []
     duplicados, alertas_monto, alertas_operador, alertas_formato = [], [], [], []
@@ -1094,9 +1102,58 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             duplicados.append(desc_val)
             continue
 
-        # ── Comisiones ────────────────────────────────────────────
+        # ── Tu Delivery (suscripción {id}::{id}::n::fee_payment) ─────────
+        _es_td = (desc_val == '__TD_SUSCRIPCION__')
+        if _es_td:
+            if not hacer_comisiones:
+                continue
+            fecha_c  = str(row.get(col_fecha, '')).strip().split(' ')[0]
+            if fecha_c == 'nan': fecha_c = ''
+            extref_v = str(row.get(col_extref, '') or '').strip() if tiene_extref else ''
+            # NÚMERO DE IDENTIFICACIÓN: 102453::22834::1::fee_payment → acc_id = '102453'
+            acc_id = extref_v.split('::')[0].strip() if '::' in extref_v else extref_v
+            if not acc_id:
+                comisiones_sin_cuenta.append({
+                    'extref': extref_v, 'slug': extref_v,
+                    'operation_id': opid, 'monto': monto_real, 'fecha': fecha_c
+                })
+                continue
+            billing_c  = get_billing(acc_id, billing_raw, rl)
+            rut_c      = billing_c.get('RUT_clean', 'NO ENCONTRADO')
+            rut_odoo_c = ref_to_nif.get(acc_id, '')
+            es_cf_c    = (limpiar_rut(rut_c)      == '111111111' or
+                          limpiar_rut(rut_odoo_c) == '111111111')
+            sin_dat_c  = (rut_c == 'NO ENCONTRADO') and not es_cf_c
+            db_id_c    = ref_to_dbid.get(acc_id, '')
+            if not db_id_c:
+                rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
+                db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
+            nombre_td  = billing_c.get('Nombre', '') or id_to_nombre.get(str(acc_id), acc_id)
+            try:
+                _dt = datetime.strptime(fecha_c, '%d/%m/%Y')
+                terminos = f"{MESES_ES[_dt.month]} {_dt.year} - TD"
+            except Exception:
+                terminos = ''
+            rows_comision.append({
+                'id_cuenta': acc_id,
+                'nombre_cuenta': id_to_nombre.get(str(acc_id), acc_id),
+                'operation_id': opid, 'monto_real': monto_real,
+                'precio_sin_iva': round(monto_real / 1.19, 2),
+                'RUT_billing': rut_c, 'RUT_odoo': rut_odoo_c,
+                'razon_social': billing_c.get('Razón social', ''),
+                'nombre_billing': f"Suscripción Tu delivery - {nombre_td}",
+                'giro': billing_c.get('Giro', ''),
+                'domicilio': billing_c.get('Domicilio', ''),
+                'comuna': billing_c.get('Comuna', ''),
+                'email': billing_c.get('Email', ''),
+                'db_id': db_id_c, 'sin_datos': sin_dat_c,
+                'es_consumidor_final': es_cf_c,
+                'fecha_compra': fecha_c, 'terminos': terminos,
+            })
+            continue
+
+        # ── DF Comisiones (admin@slug o email@slug) ───────────────────────────
         _es_comision = ('Deuda por comisiones' in desc_val or
-                        'Suscripción de Tu Delivery' in desc_val or
                         'Comisiones TuDelivery' in desc_val)
         if _es_comision:
             if not hacer_comisiones:
@@ -1105,13 +1162,8 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             if fecha_c == 'nan': fecha_c = ''
             extref_v = str(row.get(col_extref, '') or '').strip() if tiene_extref else ''
             if '@' in extref_v:
-                # Formato normal: slug@fudo.do
                 slug   = extref_v.split('@', 1)[1].lower()
                 acc_id = slug_to_accid.get(slug, '')
-            elif '::' in extref_v:
-                # Formato TuDelivery: 169013::19477::1::fee_payment
-                acc_id = extref_v.split('::')[0].strip()
-                slug   = acc_id
             else:
                 slug = extref_v; acc_id = slug_to_accid.get(slug, '')
             if not acc_id:
@@ -1125,7 +1177,6 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             rut_odoo_c = ref_to_nif.get(acc_id, '')
             es_cf_c    = (limpiar_rut(rut_c)      == '111111111' or
                           limpiar_rut(rut_odoo_c) == '111111111')
-            # Si no hay billing pero es consumidor final en Odoo → no es "sin datos"
             sin_dat_c  = (rut_c == 'NO ENCONTRADO') and not es_cf_c
             db_id_c    = ref_to_dbid.get(acc_id, '')
             if not db_id_c:
@@ -1133,14 +1184,14 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
                 db_id_c = nif_to_dbid.get(rk, 'ND') if rk else 'ND'
             try:
                 _dt = datetime.strptime(fecha_c, '%d/%m/%Y')
-                terminos = f"'{MESES_ES[_dt.month]} {_dt.year} -  DF"
+                terminos = f"{MESES_ES[_dt.month]} {_dt.year} - DF"
             except Exception:
                 terminos = ''
             rows_comision.append({
                 'id_cuenta': acc_id,
                 'nombre_cuenta': slug_to_nombre.get(slug, '') or id_to_nombre.get(str(acc_id), acc_id),
                 'operation_id': opid, 'monto_real': monto_real,
-                'precio_sin_iva': monto_real / 1.19,
+                'precio_sin_iva': round(monto_real / 1.19, 2),
                 'RUT_billing': rut_c, 'RUT_odoo': rut_odoo_c,
                 'razon_social': billing_c.get('Razón social', ''),
                 'nombre_billing': billing_c.get('Nombre', ''),
@@ -1182,13 +1233,6 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         elif ref_str.startswith('TFP:'):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas: continue
-        elif ref_str.startswith('TFID:'):
-            # Nuevo formato MP: FUDO-{account_id}-{device_id}
-            _parts = ref_str[5:].split(':', 1)
-            id_c   = _parts[0].strip()
-            nombre = _parts[1].strip() if len(_parts) > 1 else ''
-            qty_calc = max(1, round(monto_real / (PRECIO_UNIT * 1.19)))
-            lineas = [{'qty': qty_calc, 'desc': 0.0}]
         elif ref_str.startswith('TNOM:'):
             # Formato "Terminales Fudo — Nombre del negocio"
             nombre = ref_str[5:].strip()
@@ -2777,8 +2821,9 @@ def run_auditoria(df_c, cols, ids_facturados_real):
                      if tiene_extref else pd.Series([False]*len(df_c), index=df_c.index))
     mask_op       = (df_c[col_op].apply(es_comercial) if col_op in df_c.columns
                      else pd.Series([False]*len(df_c), index=df_c.index))
-    mask_comision = df_c[col_desc].astype(str).str.contains('Deuda por comisiones', na=False)
-    df_rel = df_c[mask_reason | mask_extref | mask_op | mask_comision].copy()
+    mask_comision = df_c[col_desc].astype(str).str.contains('Deuda por comisiones|Comisiones TuDelivery', na=False)
+    mask_td_aud   = df_c[col_desc].astype(str) == '__TD_SUSCRIPCION__'
+    df_rel = df_c[mask_reason | mask_extref | mask_op | mask_comision | mask_td_aud].copy()
 
     filas  = []
     vistos = set()
@@ -2806,19 +2851,21 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             continue
 
         # ── Deuda fija ────────────────────────────────────────
+        _es_td_aud = (desc_val == '__TD_SUSCRIPCION__')
         _es_df = ('Deuda por comisiones' in desc_val or
-                  'Suscripción de Tu Delivery' in desc_val or
-                  'Comisiones TuDelivery' in desc_val)
+                  'Comisiones TuDelivery' in desc_val or
+                  _es_td_aud)
         if _es_df:
             if '@' in extref:
                 slug = extref.split('@', 1)[1].lower()
             elif '::' in extref:
-                slug = extref.split('::')[0].strip()
+                slug = extref.split('::')[0].strip()  # Tu Delivery: primer ID
             else:
                 slug = extref
             estado = 'FACTURADO' if opid in ids_facturados_real else 'FALTANTE'
+            tipo_df = 'Tu Delivery' if _es_td_aud else 'Deuda fija'
             filas.append({
-                'operation_id': opid, 'fecha': fecha, 'tipo': 'Deuda fija',
+                'operation_id': opid, 'fecha': fecha, 'tipo': tipo_df,
                 'cuenta': slug or extref, 'id_cuenta': '',
                 'monto': monto, 'estado': estado, 'detalle': '',
             })
@@ -2840,11 +2887,6 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas:
                 continue
-        elif ref_str.startswith('TFID:'):
-            _parts = ref_str[5:].split(':', 1)
-            id_c   = _parts[0].strip()
-            nombre = _parts[1].strip() if len(_parts) > 1 else ''
-            lineas = [{'qty': 1, 'desc': 0.0}]
         elif ref_str.startswith('TNOM:'):
             nombre = ref_str[5:].strip()
             id_c   = nombre
@@ -2952,6 +2994,107 @@ def generar_excel_auditoria(filas, periodo=''):
     output = io.BytesIO()
     wb.save(output); output.seek(0)
     return output
+
+
+# ─── Paneles de guía inline ──────────────────────────────────────────────────
+def _card(icon, titulo, cuerpo, color_borde='#3938A0', color_fondo='#F5F5FF'):
+    """Renderiza una card de guía estilizada."""
+    st.markdown(f"""
+    <div style="border-left:4px solid {color_borde}; background:{color_fondo};
+                border-radius:8px; padding:16px 20px; margin-bottom:16px;">
+      <div style="font-family:'Barlow',sans-serif; font-size:16px; font-weight:700;
+                  color:{color_borde}; margin-bottom:8px;">{icon} {titulo}</div>
+      <div style="font-family:'Barlow',sans-serif; font-size:14px; color:#333; line-height:1.6;">
+        {cuerpo}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+def _guia_paso1():
+    _card('📋', 'PASO 1 — Crear contactos en Odoo',
+        '<b>¿Para qué sirve?</b> Antes de facturar, Odoo necesita tener registradas todas las cuentas '
+        'que cobraron en Mercado Pago. Este paso detecta cuáles son nuevas y genera el archivo para importarlas.<br><br>'
+        '<b>Flujo:</b><br>'
+        '① Subís los archivos de abajo ② Hacés clic en <i>Procesar</i> '
+        '③ Descargás el Excel de contactos ④ Lo importás en Odoo (<i>Contactos → Importar registros</i>) '
+        '⑤ Exportás el <b>res.partner</b> actualizado desde Odoo '
+        '⑥ Volvés aquí, elegís <b>PASO 2</b> y subís ese archivo.<br><br>'
+        '<b>💡 Tip:</b> Si el procesador no genera archivo de contactos, todas las cuentas ya están en Odoo — podés ir directo al PASO 2.',
+        color_borde='#3938A0', color_fondo='#F5F5FF')
+
+def _guia_paso2(tipo_fact):
+    _card('🧾', f'PASO 2 — Facturar ({tipo_fact})',
+        '<b>¿Para qué sirve?</b> Genera el Excel de facturación listo para importar en Odoo.<br><br>'
+        '<b>Flujo:</b><br>'
+        '① Subís los archivos ② Elegís qué facturar (Terminales / Deuda fija / ambos) '
+        '③ Hacés clic en <i>Procesar</i> ④ Descargás el Excel de facturación '
+        '⑤ Lo importás en Odoo (<i>Facturación → Facturas de clientes → Importar registros</i>)<br><br>'
+        '<b>💡 Tip:</b> Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
+        color_borde='#FF5023', color_fondo='#FFF8F6')
+
+def _guia_archivos(es_paso1, proc_com):
+    with st.expander('📖 ¿Para qué sirve cada archivo?', expanded=False):
+        _items = [
+            ('📥', 'Collection Mercado Pago', '#3938A0',
+             'El reporte de cobros del período, exportado desde el portal de Mercado Pago. '
+             'Contiene cada pago recibido con el ID de operación, monto y fecha. '
+             '<b>Dónde bajarlo:</b> MP → Reportes → Liquidaciones → Exportar (formato MP_CL-FECHA.xlsx).'),
+            ('🧾', 'Billing data', '#3938A0',
+             'Los datos de facturación (RUT, razón social, giro, dirección) de cada cuenta. '
+             '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Billing data → Exportar. '
+             'Las cuentas sin este dato se facturan como <i>Consumidor Final</i>.'),
+            ('📬', 'Extracto de mails', '#6B6BA8',
+             '<i>Opcional.</i> Archivo con el email de cada cuenta. Se usa para completar el campo de correo '
+             'en contactos nuevos que no tienen datos de facturación completos. '
+             '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Mails.'),
+            ('👥', 'Contactos Odoo — res.partner', '#3938A0',
+             'La exportación del modelo de contactos de Odoo. El procesador lo usa para cruzar '
+             'qué cuentas de MP ya existen en Odoo (por RUT o ID) y cuáles son nuevas. '
+             '<b>Dónde bajarlo:</b> Odoo → Contactos → Exportar → seleccioná res.partner.'),
+            ('📒', 'Asiento contable Odoo', '#3938A0',
+             'El listado de facturas ya emitidas en Odoo. El procesador lo usa para evitar '
+             'facturar dos veces la misma operación de MP. '
+             '<b>Dónde bajarlo:</b> Odoo → Facturación → Facturas de clientes → Exportar.'),
+        ]
+        if proc_com:
+            _items.append(('🗂️', 'Accounts CSV', '#E07B00',
+                'Necesario solo cuando facturás <b>Deuda fija</b>. Contiene el listado de cuentas '
+                'con su plan, estado y slug, que el procesador usa para identificar las deudas fijas. '
+                '<b>Dónde bajarlo:</b> dash.fu.do → Reportes → Accounts → Exportar.'))
+        if es_paso1:
+            _items.append(('📊', 'Extracto Deuda Viva', '#1A7A4A',
+                '<i>Opcional en PASO 1.</i> Si lo subís, el procesador detecta también qué cuentas '
+                'de Deuda Viva son nuevas y las agrega al archivo de contactos, '
+                'ahorrando un paso adicional después.'))
+
+        for icon, nombre, color, desc in _items:
+            st.markdown(f"""
+            <div style="border-left:3px solid {color}; padding:10px 14px; margin-bottom:10px;
+                        background:#FAFAFA; border-radius:6px;">
+              <span style="font-weight:700; color:{color};">{icon} {nombre}</span><br>
+              <span style="font-size:13px; color:#444; line-height:1.5;">{desc}</span>
+            </div>""", unsafe_allow_html=True)
+
+def _guia_alertas():
+    with st.expander('🚦 ¿Qué significan las alertas y colores del Excel?', expanded=False):
+        _alertas = [
+            ('🔴', 'Fila roja', 'La cuenta <b>no tiene datos de facturación</b> (sin RUT, sin razón social). '
+             'Se factura como <i>Consumidor Final</i> (boleta). Podés cargar los datos manualmente en el expander de abajo.'),
+            ('🟠', 'Celda naranja en columna Contacto', 'La cuenta <b>existe en el Billing data pero no en Odoo</b>. '
+             'Falta importarla como contacto primero (PASO 1).'),
+            ('🟡', 'Celda amarilla en Referencia de Pago / Cantidad', 'El <b>monto cobrado no coincide</b> con lo esperado '
+             'según la cantidad de terminales. Revisar manualmente antes de importar.'),
+            ('⚠️', 'Alerta de formato', 'Hay pagos en el Collection que <b>no tienen un formato reconocido</b>. '
+             'Puede ser un pago manual o un reembolso. Revisar en la pestaña Alertas del Excel.'),
+            ('👤', 'Operador comercial sin referencia', 'Un cobro de un operador comercial que <b>no tiene referencia '
+             'de terminal o TFP</b>. Hay que agregar la referencia en el sistema.'),
+        ]
+        for icon, titulo, desc in _alertas:
+            st.markdown(f"""
+            <div style="display:flex; gap:12px; padding:8px 0; border-bottom:1px solid #EEE;">
+              <div style="font-size:20px; min-width:28px;">{icon}</div>
+              <div><b>{titulo}</b><br>
+              <span style="font-size:13px; color:#555;">{desc}</span></div>
+            </div>""", unsafe_allow_html=True)
 
 
 # ─── Session-state: persistencia de archivos subidos ─────────────────────────
@@ -3126,6 +3269,17 @@ def main():
     if es_guia:
         _render_guia()
         return
+
+    # ── Guía inline del paso actual ────────────────────────────
+    if es_paso1:
+        _guia_paso1()
+    elif not es_hw and not es_dv:
+        _guia_paso2(tipo_fact)
+
+    _guia_archivos(es_paso1, proc_com)
+    _guia_alertas()
+
+    st.divider()
 
     # ── Carga rápida ───────────────────────────────────────────
     with st.expander("⚡ Carga rápida — seleccioná todos los archivos de una vez", expanded=False):
