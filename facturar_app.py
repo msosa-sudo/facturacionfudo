@@ -428,7 +428,66 @@ def normalizar(s):
     return re.sub(r'\s+', ' ', s)
 
 def es_vacio(val):
-    return not val or str(val).strip() == '' or str(val).lower() in ('nan','none','no encontrado','')
+    return not val or str(val).strip() == '' or str(val).lower() in ('nan','none','no encontrado','null','')
+
+# ─── Comparación inteligente billing vs Odoo ──────────────────────────────────
+# Abreviaturas que deben tratarse como equivalentes
+_ABREV_EQUIV = [
+    (r'\bavda?\b\.?',      'av'),   # Av. / Avda. → av
+    (r'\bavenida\b',       'av'),
+    (r'\bcia\b\.?',        'compania'),
+    (r'\bcompañia\b',      'compania'),
+    (r'\bltda\b\.?',       'limitada'),
+    (r'\bs\.?a\.?\b',      'sa'),
+    (r'\bn[°º]\b',         'n'),
+    (r'\bnro\b\.?',        'n'),
+    (r'\bnum\b\.?',        'n'),
+    (r'\bsanto\b',         'sto'),
+    (r'\bsanta\b',         'sta'),
+    (r'\bsaint\b',         'st'),
+]
+
+def normalizar_cmp(s):
+    """Normaliza para comparación: minúsculas, sin tildes, sin puntos finales,
+    abreviaturas equivalentes colapsadas, NULL tratado como vacío."""
+    if es_vacio(s): return ''
+    s = normalizar(str(s))
+    s = s.rstrip('.,;')
+    # Null literal → vacío
+    if s == 'null': return ''
+    # Colapsar abreviaturas
+    for pat, repl in _ABREV_EQUIV:
+        s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def strip_city_suffix(s):
+    """Si el billing domicilio termina con ", Ciudad" (sin dígitos), lo quita.
+    Ej: "Lynch 37, Viña del Mar" → "Lynch 37"."""
+    s = s.strip().rstrip('.,')
+    parts = s.split(',')
+    if len(parts) > 1:
+        last = parts[-1].strip()
+        # Quitar solo si el último segmento no contiene números (es ciudad, no "Local 2")
+        if last and not re.search(r'\d', last):
+            s = ','.join(parts[:-1]).strip()
+    return s
+
+def son_equivalentes_dir(val_b, val_o):
+    """True si val_b (billing) y val_o (Odoo) son equivalentes después de
+    quitar sufijo de ciudad y normalizar abreviaturas."""
+    b = normalizar_cmp(strip_city_suffix(str(val_b)))
+    o = normalizar_cmp(str(val_o))
+    return b == o or b == normalizar_cmp(strip_city_suffix(str(val_o)))
+
+def son_equivalentes(val_b, val_o, campo=''):
+    """Comparación inteligente billing vs Odoo por campo."""
+    if campo == 'domicilio':
+        return son_equivalentes_dir(val_b, val_o)
+    if campo == 'giro':
+        # Giro billing > 40 chars → no es cambio (límite SII)
+        if len(str(val_b).strip()) > 40:
+            return True
+    return normalizar_cmp(val_b) == normalizar_cmp(val_o)
 
 def limpiar_rut(rut):
     return str(rut).replace('.','').replace('-','').lower().strip()
@@ -1765,19 +1824,30 @@ def generar_excel_contacto_hw(filas: list[dict], rl: dict) -> bytes:
     return output.getvalue()
 
 # ─── Clasificación de contactos ───────────────────────────────────────────────
-def clasificar_contactos(df_work, df_comision, refs, rl):
-    ref_to_dbid      = refs['ref_to_dbid']
-    ref_to_nif       = refs['ref_to_nif']
-    nif_to_dbid      = refs['nif_to_dbid']
-    nif_to_ref       = refs['nif_to_ref']
+def clasificar_contactos(df_work, df_comision, refs, rl, excepciones=None):
+    """excepciones: dict {id_cuenta: set(campos)} ya revisados — no se vuelven a mostrar como diff."""
+    ref_to_dbid       = refs['ref_to_dbid']
+    ref_to_nif        = refs['ref_to_nif']
+    nif_to_dbid       = refs['nif_to_dbid']
+    nif_to_ref        = refs['nif_to_ref']
     ref_to_odoo_datos = refs['ref_to_odoo_datos']
+    if excepciones is None:
+        excepciones = {}
 
     frames = []
     if not df_work.empty:    frames.append(df_work[~df_work['sin_datos']])
     if not df_comision.empty: frames.append(df_comision[~df_comision['sin_datos']])
-    if not frames:
-        return [], [], [], [], []
-    df_all = pd.concat(frames, ignore_index=True).drop_duplicates('id_cuenta')
+
+    # Cuentas sin billing data → se crean como consumidor final si no están en Odoo
+    frames_sd = []
+    if not df_work.empty and 'sin_datos' in df_work.columns:
+        frames_sd.append(df_work[df_work['sin_datos']])
+    if not df_comision.empty and 'sin_datos' in df_comision.columns:
+        frames_sd.append(df_comision[df_comision['sin_datos']])
+
+    if not frames and not frames_sd:
+        return [], [], [], [], [], []
+    df_all = pd.concat(frames, ignore_index=True).drop_duplicates('id_cuenta') if frames else pd.DataFrame()
 
     casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar = [], [], [], [], [], []
 
@@ -1804,13 +1874,17 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                     or (sin_datos_billing and rut_odoo_clean in ('', 'nan'))):
                 casos_ok.append(id_c)
                 if not sin_datos_billing:
-                    datos_odoo = ref_to_odoo_datos.get(id_c, {})
-                    campos_b   = {'razon_social': row['razon_social'], 'giro': row['giro'],
-                                  'domicilio': row['domicilio'], 'comuna': row['comuna']}
+                    datos_odoo  = ref_to_odoo_datos.get(id_c, {})
+                    exc_campos  = excepciones.get(str(id_c), set())
+                    campos_b    = {'razon_social': row['razon_social'], 'giro': row['giro'],
+                                   'domicilio': row['domicilio'], 'comuna': row['comuna']}
                     diffs = {}
                     for campo, val_b in campos_b.items():
+                        if campo in exc_campos:
+                            continue  # ya fue revisado y marcado como excepción
                         val_o = datos_odoo.get(campo, '')
-                        if not es_vacio(val_b) and normalizar(val_b) != normalizar(val_o):
+                        # Comparación inteligente: abreviaturas, sufijo ciudad, giro>40, NULL
+                        if not es_vacio(val_b) and not son_equivalentes(val_b, val_o, campo):
                             diffs[campo] = {'billing': val_b, 'odoo': val_o}
                     if diffs:
                         casos_dc.append({
@@ -1872,6 +1946,30 @@ def clasificar_contactos(df_work, df_comision, refs, rl):
                 'region': buscar_region(row['comuna'], rl),
                 'es_reemplazo': False,
             })
+
+    # ── Cuentas sin billing → crear como consumidor final si no están en Odoo ──
+    if frames_sd:
+        df_sd = pd.concat(frames_sd, ignore_index=True).drop_duplicates('id_cuenta')
+        ids_ya_en_crear = {str(c['id_cuenta']) for c in casos_crear}
+        for _, row in df_sd.iterrows():
+            id_c = str(row['id_cuenta'])
+            if id_c in ref_to_dbid:
+                casos_ok.append(id_c)   # ya existe en Odoo → OK como CF
+            elif id_c not in ids_ya_en_crear:
+                # Sin datos de billing y sin registro en Odoo → crear como consumidor final
+                casos_crear.append({
+                    'id_cuenta':    id_c,
+                    'nombre_cuenta': row.get('nombre_cuenta', id_c),
+                    'RUT':          '',   # generar_excel_contactos usa CF_RUT_DISPLAY como default
+                    'razon_social': '',
+                    'giro':         '',
+                    'domicilio':    '',
+                    'comuna':       '',
+                    'email':        '',
+                    'region':       '',
+                    'es_reemplazo': False,
+                })
+                ids_ya_en_crear.add(id_c)
 
     return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar
 
@@ -3658,8 +3756,9 @@ def main():
             return
 
         with st.spinner("Clasificando contactos..."):
+            _excepciones_dc = st.session_state.get('excepciones_dc', {})
             casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar = clasificar_contactos(
-                df_work, df_comision, refs, rl
+                df_work, df_comision, refs, rl, excepciones=_excepciones_dc
             )
 
         # ── Deuda Viva: agregar cuentas DV sin DB_ID a casos_crear ──
@@ -3758,7 +3857,7 @@ def main():
             'n_comision': len(rows_comision),
             # alertas
             'n_casos_act': len(casos_act), 'n_casos_actualizar': len(casos_actualizar),
-            'n_casos_dc': len(casos_dc), 'n_alertas_op': len(alertas_op),
+            'n_casos_dc': len(casos_dc), 'casos_dc_detail': casos_dc, 'n_alertas_op': len(alertas_op),
             'n_alertas_fmt': len(alertas_fmt), 'n_csc': len(csc), 'n_alertas_monto': len(alertas_monto),
             # flags
             'hay_contactos_nuevos': hay_contactos_nuevos, 'hay_actualizaciones': hay_actualizaciones,
@@ -3789,6 +3888,26 @@ def main():
             st.info(f"ℹ️ **{_s['n_casos_actualizar']} contacto(s)** sin RUT en Odoo — se actualizan con datos de billing.")
         if _s['n_casos_dc']:
             st.info(f"ℹ️ **{_s['n_casos_dc']} contacto(s)** con datos distintos en billing — ver archivo de actualizaciones.")
+            if _s.get('casos_dc_detail'):
+                with st.expander(f"🔎 Ver diffs y marcar excepciones ({_s['n_casos_dc']} cuenta(s))"):
+                    _exc = st.session_state.setdefault('excepciones_dc', {})
+                    _reprocesar = False
+                    for _dc in _s['casos_dc_detail']:
+                        _id  = str(_dc['id_cuenta'])
+                        _nom = _dc['nombre_cuenta']
+                        st.markdown(f"**{_nom}** (ID {_id})")
+                        for _campo, _vals in _dc['diffs'].items():
+                            _col_a, _col_b, _col_c = st.columns([3, 3, 2])
+                            _col_a.write(f"**{_campo}**: billing = `{_vals['billing']}`")
+                            _col_b.write(f"Odoo = `{_vals['odoo']}`")
+                            _exc_key = f"exc_{_id}_{_campo}"
+                            if _col_c.button("✓ Dejar como Odoo", key=_exc_key, help="No volver a mostrar este campo como diff"):
+                                _exc.setdefault(_id, set()).add(_campo)
+                                st.session_state['excepciones_dc'] = _exc
+                                _reprocesar = True
+                        st.divider()
+                    if _reprocesar:
+                        st.rerun()
         if _s['n_alertas_op']:
             st.warning(f"⚠️ **{_s['n_alertas_op']} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
         if _s['n_alertas_fmt']:
