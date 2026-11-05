@@ -492,6 +492,25 @@ def son_equivalentes(val_b, val_o, campo=''):
 def limpiar_rut(rut):
     return str(rut).replace('.','').replace('-','').lower().strip()
 
+def _normalizar_ref(ref):
+    """Normaliza una Referencia de Odoo o ID de cuenta:
+    - convierte a texto
+    - quita espacios
+    - quita sufijo ".0" (pandas lee enteros como float a veces)
+    - "_old" se conserva (230994_old ≠ 230994)
+    - vacío / nan → cadena vacía
+    """
+    s = str(ref).strip()
+    if s.lower() in ('', 'nan', 'none', 'nat'):
+        return ''
+    # Quitar ".0" final solo si el resultado es un número entero válido
+    if s.endswith('.0') and not s.endswith('_old'):
+        try:
+            s = str(int(float(s)))
+        except (ValueError, OverflowError):
+            pass
+    return s
+
 def es_comercial(op):
     return any(c in str(op).lower() for c in COMERCIALES)
 
@@ -794,7 +813,11 @@ def leer_contactos(f):
             f"Verificá que sea la exportación de res.partner de Odoo"
         )
 
-    df['Referencia_clean'] = df['Referencia'].astype(str).str.strip() if 'Referencia' in df.columns else ''
+    tiene_referencia = 'Referencia' in df.columns
+    if tiene_referencia:
+        df['Referencia_clean'] = df['Referencia'].apply(_normalizar_ref)
+    else:
+        df['Referencia_clean'] = ''
     df['NIF_clean'] = (df[col_nif].astype(str)
                        .str.replace('.', '', regex=False)
                        .str.replace('-', '', regex=False)
@@ -835,6 +858,11 @@ def leer_contactos(f):
             'email':       str(r.get(col_email, '') or '').strip() if col_email else '',
             'nombre':      str(r.get('Nombre', '') or '').strip(),
         }
+    # ── Detectar referencias duplicadas (mismo Referencia en más de 1 contacto) ──
+    df_refs_validas = df[df['Referencia_clean'] != '']
+    _ref_counts = df_refs_validas['Referencia_clean'].value_counts()
+    refs_duplicadas = _ref_counts[_ref_counts > 1].index.tolist()
+
     return {
         'ref_to_dbid':       df.set_index('Referencia_clean')['DB_ID'].to_dict(),
         'ref_to_nif':        df.set_index('Referencia_clean')['NIF_clean'].to_dict(),
@@ -843,6 +871,12 @@ def leer_contactos(f):
         'nif_to_ref':        df.set_index('NIF_clean')['Referencia_clean'].to_dict(),
         'ref_to_odoo_datos': ref_to_odoo_datos,
         'ref_to_extra':      ref_to_extra,
+        # ── metadata para Control sheet ──────────────────────────────────────
+        '_meta': {
+            'tiene_referencia': tiene_referencia,
+            'n_filas':          len(df),
+            'refs_duplicadas':  refs_duplicadas,
+        },
     }
 
 def leer_odoo(f):
@@ -1973,8 +2007,107 @@ def clasificar_contactos(df_work, df_comision, refs, rl, excepciones=None):
 
     return casos_ok, casos_dc, casos_act, casos_crear, casos_rut_otro, casos_actualizar
 
+# ─── Control obligatorio de Referencia ───────────────────────────────────────
+def control_referencias(casos_crear, refs, f_contactos_name=''):
+    """
+    Verifica que ningún candidato a contacto nuevo ya tenga su Referencia en Odoo.
+    Retorna un dict con:
+      - casos_crear_ok: lista filtrada (solo verdaderamente nuevos)
+      - descartados: [{'id_cuenta', 'nombre_cuenta', 'db_id', 'nif_odoo', 'motivo'}]
+      - rut_distinto: igual pero con RUT diferente (candidatos a baja+cambio)
+      - n_candidatos, n_descartados, n_nuevos, n_rut_distinto
+      - refs_duplicadas_odoo: lista de refs repetidas en el reporte Odoo
+      - warnings: lista de strings de advertencia
+      - fecha_odoo_ok: bool (el archivo parece del día de hoy)
+      - filas_ok: bool (≥ 9000 filas)
+      - f_name: nombre del archivo
+    """
+    ref_to_dbid  = refs.get('ref_to_dbid', {})
+    ref_to_nif   = refs.get('ref_to_nif', {})
+    ref_to_nombre = refs.get('ref_to_nombre', {})
+    meta         = refs.get('_meta', {})
+
+    # ── Detectar fecha en nombre de archivo ──────────────────────────────────
+    _hoy_str  = date.today().strftime('%Y-%m-%d')
+    _fecha_re = re.search(r'(\d{4}-\d{2}-\d{2})', f_contactos_name or '')
+    fecha_odoo_ok = bool(_fecha_re and _fecha_re.group(1) == _hoy_str)
+    filas_ok      = meta.get('n_filas', 0) >= 9000
+
+    warnings = []
+    if not meta.get('tiene_referencia', True):
+        warnings.append('El reporte de contactos NO tiene columna "Referencia" — control imposible.')
+    if not filas_ok:
+        warnings.append(f'El reporte tiene solo {meta.get("n_filas",0)} filas (mínimo esperado: 9.000).')
+    if not fecha_odoo_ok:
+        _f_det = _fecha_re.group(1) if _fecha_re else '(no detectada)'
+        warnings.append(f'Fecha del reporte: {_f_det} — hoy es {_hoy_str}.')
+
+    # ── Control por Referencia ────────────────────────────────────────────────
+    casos_crear_ok = []
+    descartados    = []   # ref ya existe, mismo RUT o sin billing
+    rut_distinto   = []   # ref ya existe, RUT distinto → candidato a baja+cambio
+
+    ids_vistos = set()  # para detectar duplicados internos
+    for c in casos_crear:
+        ref  = _normalizar_ref(str(c.get('id_cuenta', '')))
+        if not ref:
+            casos_crear_ok.append(c)
+            continue
+
+        # Detectar duplicado interno en el propio archivo de nuevos
+        if ref in ids_vistos:
+            # Es un duplicado — saltar silenciosamente (ya fue procesado)
+            continue
+        ids_vistos.add(ref)
+
+        if ref in ref_to_dbid:
+            # La Referencia ya existe en Odoo
+            db_id    = ref_to_dbid[ref]
+            nif_odoo = ref_to_nif.get(ref, '')
+            nom_odoo = ref_to_nombre.get(ref, '')
+            rut_b    = limpiar_rut(c.get('RUT', ''))
+            rut_o    = limpiar_rut(nif_odoo)
+            # RUT distinto y no vacío → candidato a baja/cambio
+            if rut_b and rut_o and rut_b != rut_o and rut_b != CF_RUT and rut_o != CF_RUT:
+                rut_distinto.append({
+                    'id_cuenta':    ref,
+                    'nombre_cuenta': c.get('nombre_cuenta', ref),
+                    'db_id':        db_id,
+                    'nif_billing':  c.get('RUT', ''),
+                    'nif_odoo':     nif_odoo,
+                    'nombre_odoo':  nom_odoo,
+                    'motivo':       'Ref. existe en Odoo con RUT distinto → revisar baja/cambio',
+                })
+            else:
+                descartados.append({
+                    'id_cuenta':    ref,
+                    'nombre_cuenta': c.get('nombre_cuenta', ref),
+                    'db_id':        db_id,
+                    'nif_odoo':     nif_odoo,
+                    'nombre_odoo':  nom_odoo,
+                    'motivo':       'Referencia ya existe en Odoo',
+                })
+        else:
+            casos_crear_ok.append(c)
+
+    return {
+        'casos_crear_ok':       casos_crear_ok,
+        'descartados':          descartados,
+        'rut_distinto':         rut_distinto,
+        'n_candidatos':         len(ids_vistos),
+        'n_descartados':        len(descartados),
+        'n_rut_distinto':       len(rut_distinto),
+        'n_nuevos':             len(casos_crear_ok),
+        'refs_duplicadas_odoo': meta.get('refs_duplicadas', []),
+        'warnings':             warnings,
+        'fecha_odoo_ok':        fecha_odoo_ok,
+        'filas_ok':             filas_ok,
+        'n_filas_odoo':         meta.get('n_filas', 0),
+        'f_name':               f_contactos_name,
+    }
+
 # ─── Generación Excel de Contactos ───────────────────────────────────────────
-def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl, emails_map=None):
+def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl, emails_map=None, control_data=None):
     if emails_map is None:
         emails_map = {}
     wb = Workbook()
@@ -2156,6 +2289,117 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
                     cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
                     cell.alignment = Alignment(vertical='center', wrap_text=True)
                 fila_dc += 1; primera = False
+
+    # ── Hoja Control ──────────────────────────────────────────────────────────
+    cd = control_data or {}
+    ws_ctrl = wb.create_sheet('📋 Control')
+    _hdr_fill   = PatternFill('solid', fgColor='1F4E79')
+    _warn_fill  = PatternFill('solid', fgColor='C00000')
+    _ok_fill    = PatternFill('solid', fgColor='375623')
+    _gray_fill  = PatternFill('solid', fgColor='F2F2F2')
+    _hdr_font_w = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+    _val_font   = Font(name='Arial', size=10)
+    _c_brd      = Border(left=Side(style='thin',color='CCCCCC'),right=Side(style='thin',color='CCCCCC'),
+                         top=Side(style='thin',color='CCCCCC'),bottom=Side(style='thin',color='CCCCCC'))
+
+    def _ctrl_row(ws, r, label, value, fill=None, bold_val=False):
+        c1 = ws.cell(row=r, column=1, value=label)
+        c1.font = Font(bold=True, name='Arial', size=10); c1.fill = _gray_fill; c1.border = _c_brd
+        c1.alignment = Alignment(vertical='center')
+        c2 = ws.cell(row=r, column=2, value=value)
+        c2.font = Font(bold=bold_val, name='Arial', size=10); c2.border = _c_brd
+        c2.alignment = Alignment(vertical='center', wrap_text=True)
+        if fill: c2.fill = fill
+        return r + 1
+
+    ws_ctrl.column_dimensions['A'].width = 42
+    ws_ctrl.column_dimensions['B'].width = 60
+
+    r = 1
+    # ── Encabezado ──
+    t = ws_ctrl.cell(row=r, column=1, value='CONTROL DE REFERENCIA — contactos_nuevos')
+    t.font = Font(bold=True, name='Arial', size=12, color='FFFFFF')
+    t.fill = _hdr_fill
+    t.alignment = Alignment(horizontal='center', vertical='center')
+    ws_ctrl.merge_cells(f'A{r}:B{r}')
+    ws_ctrl.row_dimensions[r].height = 24; r += 1
+
+    # ── Advertencia principal si reporte desactualizado / incompleto ──
+    warnings = cd.get('warnings', [])
+    fecha_ok = cd.get('fecha_odoo_ok', True)
+    filas_ok = cd.get('filas_ok', True)
+    if not fecha_ok or not filas_ok or not cd.get('f_name'):
+        warn_txt = '⚠ REPORTE DE CONTACTOS DESACTUALIZADO O INCOMPLETO — NO IMPORTAR'
+        wc = ws_ctrl.cell(row=r, column=1, value=warn_txt)
+        wc.font = Font(bold=True, name='Arial', size=12, color='FFFFFF')
+        wc.fill = _warn_fill
+        wc.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        ws_ctrl.merge_cells(f'A{r}:B{r}')
+        ws_ctrl.row_dimensions[r].height = 30; r += 1
+
+    for w in warnings:
+        wc = ws_ctrl.cell(row=r, column=1, value=f'⚠ {w}')
+        wc.font = Font(bold=True, name='Arial', size=10, color='FFFFFF')
+        wc.fill = _warn_fill
+        ws_ctrl.merge_cells(f'A{r}:B{r}')
+        ws_ctrl.row_dimensions[r].height = 20; r += 1
+
+    r += 1  # separador
+    # ── Datos del reporte Odoo ──
+    r = _ctrl_row(ws_ctrl, r, 'Archivo de contactos Odoo usado', cd.get('f_name', '(no disponible)'))
+    r = _ctrl_row(ws_ctrl, r, 'Filas leídas', cd.get('n_filas_odoo', 0),
+                  fill=None if filas_ok else _warn_fill)
+    r = _ctrl_row(ws_ctrl, r, 'Fecha del reporte (del nombre del archivo)',
+                  'Hoy ✅' if fecha_ok else f'{cd.get("f_name","")[:30]} — no coincide con hoy ⚠',
+                  fill=None if fecha_ok else _warn_fill)
+    r += 1
+
+    # ── Resumen del control ──
+    r = _ctrl_row(ws_ctrl, r, 'Cuentas candidatas a "contacto nuevo"', cd.get('n_candidatos', len(casos_crear)))
+    r = _ctrl_row(ws_ctrl, r, 'Descartadas (Referencia ya existe en Odoo)', cd.get('n_descartados', 0),
+                  fill=PatternFill('solid',fgColor='FFF2CC') if cd.get('n_descartados') else None)
+    r = _ctrl_row(ws_ctrl, r, 'Con RUT distinto al de Odoo (revisar baja)', cd.get('n_rut_distinto', 0),
+                  fill=PatternFill('solid',fgColor='FCE4D6') if cd.get('n_rut_distinto') else None)
+    r = _ctrl_row(ws_ctrl, r, 'Contactos nuevos a importar', cd.get('n_nuevos', len(casos_crear)),
+                  fill=_ok_fill if cd.get('n_nuevos', 0) > 0 else None,
+                  bold_val=True)
+    r += 1
+
+    # ── Lista de descartados ──
+    descartados = cd.get('descartados', [])
+    if descartados:
+        h = ws_ctrl.cell(row=r, column=1, value='Referencia descartada')
+        h.fill = _hdr_fill; h.font = _hdr_font_w; h.border = _c_brd
+        h2 = ws_ctrl.cell(row=r, column=2, value='Nombre Odoo → DB_ID')
+        h2.fill = _hdr_fill; h2.font = _hdr_font_w; h2.border = _c_brd
+        r += 1
+        for d in descartados:
+            r = _ctrl_row(ws_ctrl, r, d['id_cuenta'],
+                          f"{d.get('nombre_odoo', d.get('nombre_cuenta', ''))} → DB_ID {d['db_id']}",
+                          fill=PatternFill('solid', fgColor='FFF2CC'))
+        r += 1
+
+    # ── Lista de RUT distinto ──
+    rut_dist = cd.get('rut_distinto', [])
+    if rut_dist:
+        h = ws_ctrl.cell(row=r, column=1, value='Referencia con RUT distinto (revisar baja)')
+        h.fill = PatternFill('solid', fgColor='C55A11'); h.font = _hdr_font_w; h.border = _c_brd
+        ws_ctrl.merge_cells(f'A{r}:B{r}'); r += 1
+        for d in rut_dist:
+            r = _ctrl_row(ws_ctrl, r, d['id_cuenta'],
+                          f"{d.get('nombre_odoo', '')} | RUT billing: {d.get('nif_billing','')} ≠ Odoo: {d.get('nif_odoo','')}",
+                          fill=PatternFill('solid', fgColor='FCE4D6'))
+        r += 1
+
+    # ── Referencias duplicadas en Odoo ──
+    refs_dup = cd.get('refs_duplicadas_odoo', [])
+    if refs_dup:
+        h = ws_ctrl.cell(row=r, column=1, value='Referencias duplicadas en Odoo (misma Ref en >1 contacto — limpiar)')
+        h.fill = _warn_fill; h.font = _hdr_font_w; h.border = _c_brd
+        ws_ctrl.merge_cells(f'A{r}:B{r}'); r += 1
+        for dup in refs_dup:
+            r = _ctrl_row(ws_ctrl, r, dup, '— duplicada en Odoo',
+                          fill=PatternFill('solid', fgColor='FCE4D6'))
 
     output = io.BytesIO()
     wb.save(output); output.seek(0)
@@ -3795,6 +4039,23 @@ def main():
 
         # Solo bloquea facturación si hay contactos completamente ausentes de Odoo.
         # casos_crear con es_reemplazo=True ya existen en Odoo (distinto RUT/ref) → solo advertencia.
+        # ── Control obligatorio de Referencia ──────────────────────────────
+        _meta = refs.get('_meta', {})
+        if not _meta.get('tiene_referencia', True):
+            st.error(
+                "⛔ **El reporte de Contactos Odoo no tiene columna 'Referencia'.**\n\n"
+                "No es posible verificar si las cuentas ya existen en Odoo. "
+                "Exportá el reporte de Odoo usando la plantilla **'Clientes - AISpA'** "
+                "que incluye esa columna y volvé a subir el archivo."
+            )
+            return
+
+        with st.spinner("Verificando referencias en Odoo..."):
+            _ctrl = control_referencias(casos_crear, refs, f_contactos_name=f_con.name if f_con else '')
+
+        # Reemplazar casos_crear con la versión filtrada (sin duplicados de Odoo)
+        casos_crear = _ctrl['casos_crear_ok']
+
         casos_crear_bloqueantes = [c for c in casos_crear if not c.get('es_reemplazo', False)]
         hay_contactos_nuevos   = len(casos_crear_bloqueantes) > 0
         hay_actualizaciones    = len(casos_act) > 0 or len(casos_actualizar) > 0 or len(casos_dc) > 0
@@ -3807,8 +4068,15 @@ def main():
         if hay_contactos_nuevos:
             with st.spinner("Generando contactos_nuevos.xlsx..."):
                 _excel_cont = generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl,
-                                                       emails_map=st.session_state.get('emails_map', {}))
+                                                       emails_map=st.session_state.get('emails_map', {}),
+                                                       control_data=_ctrl)
             _nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
+        elif _ctrl.get('n_descartados') or _ctrl.get('refs_duplicadas_odoo'):
+            # No hay nuevos pero sí hay hallazgos de control → generar igual para mostrar el Control sheet
+            with st.spinner("Generando reporte de control..."):
+                _excel_cont = generar_excel_contactos([], [], [], [], rl,
+                                                       control_data=_ctrl)
+            _nombre_cont = f"control_contactos_{date.today().strftime('%Y%m%d')}.xlsx"
 
         _excel_act, _nombre_act, _partes_act = None, None, []
         if hay_actualizaciones:
@@ -3869,6 +4137,12 @@ def main():
             'excel_fact_com':  _excel_fact_com,  'nombre_fact_com':  _nombre_fact_com,
             'faltantes_lista': _faltantes_lista, 'n_faltantes': _n_faltantes,
             'f_con_name': f_con.name if f_con else '',
+            # control de referencia
+            'ctrl_descartados':  _ctrl.get('n_descartados', 0),
+            'ctrl_rut_distinto': _ctrl.get('n_rut_distinto', 0),
+            'ctrl_warnings':     _ctrl.get('warnings', []),
+            'ctrl_fecha_ok':     _ctrl.get('fecha_odoo_ok', True),
+            'ctrl_filas_ok':     _ctrl.get('filas_ok', True),
         }
 
     # ── Display resultados (persiste entre clicks de descarga) ────────────────
@@ -3916,6 +4190,16 @@ def main():
             st.warning(f"⚠️ **{_s['n_csc']} Deuda(s) fija(s)** sin cuenta resuelta — ver hoja '⚠ Comisiones sin cuenta'.")
         if _s['n_alertas_monto']:
             st.warning(f"⚠️ **{_s['n_alertas_monto']} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
+
+        # ── Resumen control de referencia ──
+        if not _s.get('ctrl_fecha_ok', True) or not _s.get('ctrl_filas_ok', True):
+            st.error("⚠️ **Reporte de contactos desactualizado o incompleto** — revisar hoja 'Control' antes de importar.")
+        for _w in _s.get('ctrl_warnings', []):
+            st.warning(f"⚠️ Contactos Odoo: {_w}")
+        if _s.get('ctrl_descartados', 0):
+            st.info(f"ℹ️ **{_s['ctrl_descartados']} cuenta(s)** ya tienen Referencia en Odoo → descartadas del archivo de nuevos (ver hoja 'Control').")
+        if _s.get('ctrl_rut_distinto', 0):
+            st.warning(f"⚠️ **{_s['ctrl_rut_distinto']} cuenta(s)** tienen Referencia en Odoo con RUT distinto → revisar baja/cambio (ver hoja 'Control').")
 
         st.divider()
         st.subheader("📥 Descargar archivos")
