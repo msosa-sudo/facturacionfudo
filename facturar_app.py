@@ -479,6 +479,19 @@ def son_equivalentes_dir(val_b, val_o):
     o = normalizar_cmp(str(val_o))
     return b == o or b == normalizar_cmp(strip_city_suffix(str(val_o)))
 
+def _normalizar_razon(s):
+    """Para razon_social: normaliza & ↔ y (en contexto de nombre de empresa)."""
+    s = normalizar_cmp(s)
+    # "&" y "y" (conjunción) se tratan como equivalentes en nombres de empresa
+    s = re.sub(r'\s*&\s*', ' y ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def _normalizar_giro(s):
+    """Para giro: strip del prefijo numérico SII tipo '5814 - ' antes de comparar."""
+    s = normalizar_cmp(s)
+    s = re.sub(r'^\d{3,4}\s*[-–]\s*', '', s)
+    return s.strip()
+
 def son_equivalentes(val_b, val_o, campo=''):
     """Comparación inteligente billing vs Odoo por campo."""
     if campo == 'domicilio':
@@ -487,6 +500,9 @@ def son_equivalentes(val_b, val_o, campo=''):
         # Giro billing > 40 chars → no es cambio (límite SII)
         if len(str(val_b).strip()) > 40:
             return True
+        return _normalizar_giro(val_b) == _normalizar_giro(val_o)
+    if campo == 'razon_social':
+        return _normalizar_razon(val_b) == _normalizar_razon(val_o)
     return normalizar_cmp(val_b) == normalizar_cmp(val_o)
 
 def limpiar_rut(rut):
@@ -2135,7 +2151,8 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             id_vistos.add(c['id_cuenta']); casos_dedup.append(c)
 
     for row_idx, c in enumerate(casos_dedup, 2):
-        sin_datos_c = (c['RUT'] == 'NO ENCONTRADO' and not c.get('razon_social','').strip()
+        _rut_c = str(c.get('RUT', '') or '').strip()
+        sin_datos_c = (_rut_c in ('', 'NO ENCONTRADO') and not c.get('razon_social','').strip()
                        and not c.get('domicilio','').strip())
         es_caso4    = c.get('rut_ya_existe', False)
 
@@ -2153,7 +2170,7 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
             _nc = str(c.get('nombre_cuenta', '') or '').strip()
             nombre_d = _nc if (_nc and not _nc.isdigit()) else ''
         else:
-            rut_d    = c['RUT'] if c['RUT'] != 'NO ENCONTRADO' else ''
+            rut_d    = _rut_c if _rut_c not in ('', 'NO ENCONTRADO') else ''
             dom_d    = c['domicilio']
             ciudad_d = c['comuna']
             region_d = c['region']
@@ -4178,10 +4195,18 @@ def main():
                             if _col_c.button("✓ Dejar como Odoo", key=_exc_key, help="No volver a mostrar este campo como diff"):
                                 _exc.setdefault(_id, set()).add(_campo)
                                 st.session_state['excepciones_dc'] = _exc
-                                _reprocesar = True
+                                # Actualizar también el caché en _paso12_state para que el rerun
+                                # muestre la lista ya filtrada (sin esperar un nuevo Procesar)
+                                _upd = st.session_state.get('_paso12_state', {})
+                                _upd_detail = _upd.get('casos_dc_detail', [])
+                                for _upd_dc in _upd_detail:
+                                    if str(_upd_dc['id_cuenta']) == _id and _campo in _upd_dc.get('diffs', {}):
+                                        del _upd_dc['diffs'][_campo]
+                                _upd['casos_dc_detail'] = [d for d in _upd_detail if d.get('diffs')]
+                                _upd['n_casos_dc'] = len(_upd['casos_dc_detail'])
+                                st.session_state['_paso12_state'] = _upd
+                                st.rerun()
                         st.divider()
-                    if _reprocesar:
-                        st.rerun()
         if _s['n_alertas_op']:
             st.warning(f"⚠️ **{_s['n_alertas_op']} pago(s)** de comerciales sin referencia — ver hoja Resumen.")
         if _s['n_alertas_fmt']:
