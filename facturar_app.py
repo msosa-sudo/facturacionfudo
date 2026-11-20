@@ -3644,6 +3644,15 @@ def main():
             for _nom in _no_detectados:
                 st.warning(f"⚠️ No se pudo detectar el rol de: **{_nom}** — subilo manualmente abajo")
 
+    # ── Aviso archivos faltantes (antes de los uploaders) ──────
+    _roles_req = [('col',"Collection"),('bil',"Billing data"),('con',"Contactos Odoo"),('odo',"Asiento contable")]
+    _faltantes_prev = [n for r, n in _roles_req if not _ss_leer_archivo(r)]
+    if _faltantes_prev:
+        st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(_faltantes_prev)}**")
+    if es_paso2 and not _ss_leer_archivo('con'):
+        st.warning("📥 **Paso 2:** el único archivo que cambia respecto al Paso 1 es **Contactos Odoo** — "
+                   "exportá el res.partner actualizado de Odoo (después de haber importado los contactos del Paso 1) y subilo acá.")
+
     # ── File uploaders ──────────────────────────────────────────
     st.subheader("📁 Archivos requeridos")
     col1, col2 = st.columns(2)
@@ -3691,11 +3700,6 @@ def main():
     # ── Botón ───────────────────────────────────────────────────
     st.divider()
     archivos_ok = all([f_col, f_bil, f_con, f_odo])
-    if not archivos_ok:
-        faltantes = [n for f, n in [(f_col,"Collection"),(f_bil,"Billing data"),
-                                    (f_con,"Contactos Odoo"),(f_odo,"Asiento contable")] if not f]
-        st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(faltantes)}**")
-
     boton = st.button("🚀  Procesar", type="primary", use_container_width=True, disabled=not archivos_ok)
 
     if boton:
