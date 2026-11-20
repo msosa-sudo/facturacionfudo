@@ -1239,6 +1239,10 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             es_cf_c    = (limpiar_rut(rut_c)      == '111111111' or
                           limpiar_rut(rut_odoo_c) == '111111111')
             sin_dat_c  = (rut_c == 'NO ENCONTRADO') and not es_cf_c
+            # Protección anti-boleta: si Odoo tiene RUT real, nunca CF
+            _rut_odoo_c_clean = limpiar_rut(rut_odoo_c)
+            if _rut_odoo_c_clean and _rut_odoo_c_clean != '111111111':
+                es_cf_c = False; sin_dat_c = False
             db_id_c    = ref_to_dbid.get(acc_id, '')
             if not db_id_c:
                 rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
@@ -1290,6 +1294,10 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
             es_cf_c    = (limpiar_rut(rut_c)      == '111111111' or
                           limpiar_rut(rut_odoo_c) == '111111111')
             sin_dat_c  = (rut_c == 'NO ENCONTRADO') and not es_cf_c
+            # Protección anti-boleta: si Odoo tiene RUT real, nunca CF
+            _rut_odoo_c2_clean = limpiar_rut(rut_odoo_c)
+            if _rut_odoo_c2_clean and _rut_odoo_c2_clean != '111111111':
+                es_cf_c = False; sin_dat_c = False
             db_id_c    = ref_to_dbid.get(acc_id, '')
             if not db_id_c:
                 rk = limpiar_rut(rut_c) if rut_c != 'NO ENCONTRADO' else ''
@@ -1379,6 +1387,14 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         if sin_datos and limpiar_rut(rut_odoo) == '111111111':
             sin_datos = False
             es_cf     = True
+        # Protección anti-boleta: si Odoo tiene un RUT real, NUNCA puede ser CF
+        # aunque el billing esté vacío o tenga el RUT de CF
+        _rut_odoo_clean = limpiar_rut(rut_odoo)
+        if _rut_odoo_clean and _rut_odoo_clean != '111111111':
+            if es_cf:
+                es_cf = False   # Odoo manda: tiene RUT real → Factura
+            if sin_datos:
+                sin_datos = False  # usar el RUT de Odoo como fallback
         fecha_t     = str(row.get(col_fecha, '')).strip().split(' ')[0]
         if fecha_t == 'nan': fecha_t = ''
 
@@ -2251,36 +2267,8 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
         value='🟠 Fila naranja = Consumidor Final (sin datos) | 🟥 Celda roja = campo vacío | 🟨 Fila amarilla = RUT ya existe | 🔴S = SUPERA LÍMITE SII'
     ).font = Font(name='Arial', color='CC5500')
 
-    # Hoja informativa para casos_act (referencia visual, no importar)
-    if casos_act:
-        ws_act = wb.create_sheet('⚠ Contactos a actualizar')
-        aplicar_header(ws_act,
-            ['ID Cuenta','Nombre en MP','Razón Social (billing)','RUT billing','RUT en Odoo','DB_ID Odoo','Acción'],
-            [12,30,35,18,18,12,55])
-        ws_act.cell(row=1, column=7).fill = PatternFill('solid', start_color='CC0000')
-        for row_idx, c in enumerate(casos_act, 2):
-            accion = f"Ver archivo 'contactos_actualizar_*.xlsx': archivar _old + nuevo contacto ya incluido arriba"
-            for col_idx, val in enumerate([c['id_cuenta'],c['nombre_cuenta'],c['razon_social'],
-                                           c['RUT_billing'],c['RUT_odoo'],c['db_id'],accion], 1):
-                cell = ws_act.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name='Arial', size=10); cell.fill = red_fill
-                cell.alignment = Alignment(vertical='center', wrap_text=True)
-            ws_act.row_dimensions[row_idx].height = 35
-
-    # RUT existe otro ID
-    if casos_rut_otro:
-        ws_rut = wb.create_sheet('⚠ RUT existe - otro ID')
-        aplicar_header(ws_rut,
-            ['ID Cuenta (nuevo)','Nombre en MP','RUT','Razón Social','DB_ID existente','Referencia existente','Acción'],
-            [14,30,18,35,14,20,45])
-        for row_idx, c in enumerate(casos_rut_otro, 2):
-            accion = f"RUT ya existe con Referencia '{c['ref_existente']}'. Verificar si es el mismo cliente."
-            for col_idx, val in enumerate([c['id_cuenta'],c['nombre_cuenta'],c['RUT'],
-                                           c['razon_social'],c['db_id_existente'],c['ref_existente'],accion], 1):
-                cell = ws_rut.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name='Arial', size=10); cell.fill = blue_fill
-                cell.alignment = Alignment(vertical='center', wrap_text=True)
-            ws_rut.row_dimensions[row_idx].height = 35
+    # (hojas "Contactos a actualizar" y "RUT existe - otro ID" eliminadas —
+    #  esa info se gestiona por el archivo contactos_actualizar separado y la UI)
 
     # Mismo RUT varios IDs
     rut_counts = {}
@@ -2300,26 +2288,7 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
                 cell.alignment = Alignment(vertical='center', wrap_text=True)
             ws_m.row_dimensions[row_idx].height = 30
 
-    # Datos cambiados
-    if casos_dc:
-        ws_dc = wb.create_sheet('⚠ Datos actualizados')
-        aplicar_header(ws_dc,
-            ['ID Cuenta','DB_ID Odoo','RUT','Nombre','Campo','Valor en billing','Valor en Odoo'],
-            [14,12,18,30,18,40,40])
-        ws_dc.cell(row=1, column=1).fill = PatternFill('solid', start_color='FF6600')
-        fila_dc = 2
-        labels = {'razon_social':'Razón Social','giro':'Giro','domicilio':'Domicilio','comuna':'Comuna'}
-        for c in casos_dc:
-            primera = True
-            for campo, vals in c['diffs'].items():
-                rv = [c['id_cuenta'] if primera else '', c['db_id'] if primera else '',
-                      c['RUT'] if primera else '', c['nombre_cuenta'] if primera else '',
-                      labels.get(campo, campo), vals['billing'], vals['odoo']]
-                for col_idx, val in enumerate(rv, 1):
-                    cell = ws_dc.cell(row=fila_dc, column=col_idx, value=val)
-                    cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
-                    cell.alignment = Alignment(vertical='center', wrap_text=True)
-                fila_dc += 1; primera = False
+    # (hoja "Datos actualizados" eliminada — esa info se gestiona en contactos_actualizar separado y la UI)
 
     # ── Hoja Control (solo si hay refs duplicadas en Odoo) ───────────────────────
     cd = control_data or {}
@@ -2750,6 +2719,53 @@ def generar_excel_facturacion(df_work, rows_comision, alertas_monto, alertas_ope
                 cell.font = Font(name='Arial', size=10); cell.fill = yellow_fill
                 if col_idx in [4,5,6]: cell.number_format = '$#,##0'
 
+    # ── Hoja ⚠ Boletas generadas ──────────────────────────────────────────────
+    # Lista todas las boletas emitidas para que el usuario pueda verificarlas
+    boletas_term = []
+    if not df_work.empty:
+        seen_bole = set()
+        for _, row in df_work.iterrows():
+            if row.get('es_consumidor_final') and not row.get('sin_datos'):
+                opid = row['operation_id']
+                if opid not in seen_bole:
+                    seen_bole.add(opid)
+                    nombre = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+                    boletas_term.append({
+                        'tipo': 'Terminal',
+                        'nombre': nombre,
+                        'id': row['id_cuenta'],
+                        'ref': opid,
+                        'db_id': row.get('db_id', ''),
+                    })
+    boletas_com = []
+    for rc in rows_comision:
+        if rc.get('es_consumidor_final') and not rc.get('sin_datos'):
+            nombre_rc = rc.get('nombre_billing') or rc.get('nombre_cuenta', '')
+            boletas_com.append({
+                'tipo': 'Comisión',
+                'nombre': nombre_rc,
+                'id': rc.get('id_cuenta', ''),
+                'ref': rc.get('operation_id', ''),
+                'db_id': rc.get('db_id', ''),
+            })
+    todas_boletas = boletas_term + boletas_com
+    if todas_boletas:
+        ws_bole = wb.create_sheet('⚠ Boletas generadas')
+        aplicar_header(ws_bole,
+            ['Tipo','Nombre de cuenta','ID cuenta','Referencia','Contacto DB'],
+            [12, 40, 14, 25, 15])
+        ws_bole.cell(row=1, column=1).fill = PatternFill('solid', fgColor='FF9900')  # naranja advertencia
+        nota = ws_bole.cell(row=1, column=5,
+            value='Verificar que estos clientes sean realmente Consumidor Final')
+        nota.font = Font(italic=True, name='Arial', size=9, color='CC0000')
+        for row_idx, b in enumerate(todas_boletas, 2):
+            vals = [b['tipo'], b['nombre'], b['id'], f"'{b['ref']}", b['db_id']]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws_bole.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10)
+                cell.fill = PatternFill('solid', fgColor='FFF2CC')
+                cell.alignment = Alignment(vertical='center')
+
     output = io.BytesIO()
     wb.save(output); output.seek(0)
     return output
@@ -2956,6 +2972,30 @@ def generar_excel_terminales_solo(df_work, alertas_monto, alertas_operador, aler
                 cell.font = Font(name='Arial', size=9); cell.fill = PatternFill('solid', start_color='FFF2CC')
                 if col == 4: cell.number_format = '$#,##0'
             fila_det += 1
+
+    # ── Hoja ⚠ Boletas generadas (terminales) ────────────────────────────────
+    boletas_term_s = []
+    if not df_work.empty:
+        seen_bts = set()
+        for _, row in df_work.iterrows():
+            if row.get('es_consumidor_final') and not row.get('sin_datos'):
+                opid = row['operation_id']
+                if opid not in seen_bts:
+                    seen_bts.add(opid)
+                    nombre = row['nombre_billing'] if row['nombre_billing'] else row['nombre_cuenta']
+                    boletas_term_s.append({'nombre': nombre, 'id': row['id_cuenta'],
+                                           'ref': opid, 'db_id': row.get('db_id', '')})
+    if boletas_term_s:
+        ws_bts = wb.create_sheet('⚠ Boletas generadas')
+        aplicar_header(ws_bts, ['Nombre de cuenta','ID cuenta','Referencia','Contacto DB'],
+                       [40, 14, 25, 15])
+        for row_idx, b in enumerate(boletas_term_s, 2):
+            vals = [b['nombre'], b['id'], f"'{b['ref']}", b['db_id']]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws_bts.cell(row=row_idx, column=col_idx, value=val)
+                cell.font = Font(name='Arial', size=10)
+                cell.fill = PatternFill('solid', fgColor='FFF2CC')
+                cell.alignment = Alignment(vertical='center')
 
     out = io.BytesIO(); wb.save(out); out.seek(0)
     return out
@@ -3426,8 +3466,11 @@ def _uploader(role, label, types, help=None, key=None):
         col_a.success(f"✅ {stored.name}")
         if col_b.button("🗑️", key=f'_clr_{role}', help="Quitar archivo"):
             _ss_limpiar_archivo(role)
-            # Limpiar carga rápida para evitar que re-guarde el mismo archivo en el siguiente rerun
-            st.session_state.pop('_carga_rapida', None)
+            # Marcar este rol como "recién borrado" para que la carga rápida no lo re-guarde
+            # en el siguiente rerun (sin perder los otros archivos del multi-uploader)
+            _jc = st.session_state.get('_just_cleared', set())
+            _jc.add(role)
+            st.session_state['_just_cleared'] = _jc
             st.rerun()
         return stored
     widget_key = key or f'_up_{role}'
@@ -3585,11 +3628,14 @@ def main():
             label_visibility='collapsed'
         )
         if _archivos_rapidos:
+            # Leer y limpiar el set de roles recién borrados (no re-guardar esos)
+            _just_cleared = st.session_state.pop('_just_cleared', set())
             _detectados, _no_detectados = {}, []
             for _f in _archivos_rapidos:
                 _rol = _detectar_rol_archivo(_f)
                 if _rol:
-                    _ss_guardar_archivo(_rol, _f)
+                    if _rol not in _just_cleared:  # no re-guardar si se acaba de borrar
+                        _ss_guardar_archivo(_rol, _f)
                     _detectados[_rol] = _f.name
                 else:
                     _no_detectados.append(_f.name)
