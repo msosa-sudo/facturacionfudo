@@ -3407,13 +3407,17 @@ def _guia_archivos(es_paso1, proc_com):
               <span style="font-size:13px; color:#444; line-height:1.5;">{desc}</span>
             </div>""", unsafe_allow_html=True)
 
-def _guia_alertas():
+def _guia_alertas(es_paso1=True):
     with st.expander('🚦 ¿Qué significan las alertas y colores del Excel?', expanded=False):
-        _alertas = [
-            ('🔴', 'Fila roja', 'La cuenta <b>no tiene datos de facturación</b> (sin RUT, sin razón social). '
-             'Se factura como <i>Consumidor Final</i> (boleta). Podés cargar los datos manualmente en el expander de abajo.'),
-            ('🟠', 'Celda naranja en columna Contacto', 'La cuenta <b>existe en el Billing data pero no en Odoo</b>. '
-             'Falta importarla como contacto primero (PASO 1).'),
+        _alertas = []
+        if es_paso1:
+            _alertas += [
+                ('🔴', 'Fila roja', 'La cuenta <b>no tiene datos de facturación</b> (sin RUT, sin razón social). '
+                 'Se genera como <i>Consumidor Final</i> en el archivo de contactos nuevos.'),
+                ('🟠', 'Celda naranja en columna Contacto', 'La cuenta <b>existe en el Billing data pero no en Odoo</b>. '
+                 'Aparece en el archivo de contactos nuevos para importar.'),
+            ]
+        _alertas += [
             ('🟡', 'Celda amarilla en Referencia de Pago / Cantidad', 'El <b>monto cobrado no coincide</b> con lo esperado '
              'según la cantidad de terminales. Revisar manualmente antes de importar.'),
             ('⚠️', 'Alerta de formato', 'Hay pagos en el Collection que <b>no tienen un formato reconocido</b>. '
@@ -3421,6 +3425,11 @@ def _guia_alertas():
             ('👤', 'Operador comercial sin referencia', 'Un cobro de un operador comercial que <b>no tiene referencia '
              'de terminal o TFP</b>. Hay que agregar la referencia en el sistema.'),
         ]
+        if not es_paso1:
+            _alertas += [
+                ('🔴', 'Fila roja en Terminales', 'La cuenta <b>no tiene datos en Odoo</b>. '
+                 'Verificar que el PASO 1 se haya hecho correctamente.'),
+            ]
         for icon, titulo, desc in _alertas:
             st.markdown(f"""
             <div style="display:flex; gap:12px; padding:8px 0; border-bottom:1px solid #EEE;">
@@ -3615,7 +3624,7 @@ def main():
         _guia_paso2(tipo_fact)
 
     _guia_archivos(es_paso1, proc_com)
-    _guia_alertas()
+    _guia_alertas(es_paso1)
 
     st.divider()
 
