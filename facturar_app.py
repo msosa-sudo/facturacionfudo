@@ -1342,6 +1342,10 @@ def procesar(df_c, cols, billing_raw, refs, ids_facturados, rl,
         elif ref_str.startswith('TFP:'):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas: continue
+            # Si parse_tfp devolvió un código de dispositivo (todo mayúsculas/dígitos, sin espacios),
+            # buscar el nombre real de la cuenta en id_to_nombre o billing
+            if nombre and re.match(r'^[A-Z0-9]{3,8}$', nombre):
+                nombre = id_to_nombre.get(str(id_c), '') or nombre
         elif ref_str.startswith('TNOM:'):
             # Formato "Terminales Fudo — Nombre del negocio"
             nombre = ref_str[5:].strip()
@@ -2044,10 +2048,21 @@ def control_referencias(casos_crear, refs, f_contactos_name=''):
     meta         = refs.get('_meta', {})
 
     # ── Detectar fecha en nombre de archivo ──────────────────────────────────
-    _hoy_str  = date.today().strftime('%Y-%m-%d')
-    _fecha_re = re.search(r'(\d{4}-\d{2}-\d{2})', f_contactos_name or '')
-    fecha_odoo_ok = bool(_fecha_re and _fecha_re.group(1) == _hoy_str)
-    filas_ok      = meta.get('n_filas', 0) >= 9000
+    _hoy_str = date.today().strftime('%Y-%m-%d')
+    _fname   = f_contactos_name or ''
+    # Soportar YYYY-MM-DD y YYYYMMDD (formato compacto que usa Odoo al exportar)
+    _m_iso     = re.search(r'(\d{4}-\d{2}-\d{2})', _fname)
+    _m_compact = re.search(r'(\d{4})(\d{2})(\d{2})', _fname)
+    if _m_iso:
+        _f_det        = _m_iso.group(1)
+        fecha_odoo_ok = (_f_det == _hoy_str)
+    elif _m_compact:
+        _f_det        = f"{_m_compact.group(1)}-{_m_compact.group(2)}-{_m_compact.group(3)}"
+        fecha_odoo_ok = (_f_det == _hoy_str)
+    else:
+        _f_det        = '(no detectada)'
+        fecha_odoo_ok = False
+    filas_ok = meta.get('n_filas', 0) >= 9000
 
     warnings = []
     if not meta.get('tiene_referencia', True):
@@ -2055,7 +2070,6 @@ def control_referencias(casos_crear, refs, f_contactos_name=''):
     if not filas_ok:
         warnings.append(f'El reporte tiene solo {meta.get("n_filas",0)} filas (mínimo esperado: 9.000).')
     if not fecha_odoo_ok:
-        _f_det = _fecha_re.group(1) if _fecha_re else '(no detectada)'
         warnings.append(f'Fecha del reporte: {_f_det} — hoy es {_hoy_str}.')
 
     # ── Control por Referencia ────────────────────────────────────────────────
@@ -2307,116 +2321,27 @@ def generar_excel_contactos(casos_crear, casos_act, casos_rut_otro, casos_dc, rl
                     cell.alignment = Alignment(vertical='center', wrap_text=True)
                 fila_dc += 1; primera = False
 
-    # ── Hoja Control ──────────────────────────────────────────────────────────
+    # ── Hoja Control (solo si hay refs duplicadas en Odoo) ───────────────────────
     cd = control_data or {}
-    ws_ctrl = wb.create_sheet('📋 Control')
-    _hdr_fill   = PatternFill('solid', fgColor='1F4E79')
-    _warn_fill  = PatternFill('solid', fgColor='C00000')
-    _ok_fill    = PatternFill('solid', fgColor='375623')
-    _gray_fill  = PatternFill('solid', fgColor='F2F2F2')
-    _hdr_font_w = Font(bold=True, color='FFFFFF', name='Arial', size=10)
-    _val_font   = Font(name='Arial', size=10)
-    _c_brd      = Border(left=Side(style='thin',color='CCCCCC'),right=Side(style='thin',color='CCCCCC'),
-                         top=Side(style='thin',color='CCCCCC'),bottom=Side(style='thin',color='CCCCCC'))
-
-    def _ctrl_row(ws, r, label, value, fill=None, bold_val=False):
-        c1 = ws.cell(row=r, column=1, value=label)
-        c1.font = Font(bold=True, name='Arial', size=10); c1.fill = _gray_fill; c1.border = _c_brd
-        c1.alignment = Alignment(vertical='center')
-        c2 = ws.cell(row=r, column=2, value=value)
-        c2.font = Font(bold=bold_val, name='Arial', size=10); c2.border = _c_brd
-        c2.alignment = Alignment(vertical='center', wrap_text=True)
-        if fill: c2.fill = fill
-        return r + 1
-
-    ws_ctrl.column_dimensions['A'].width = 42
-    ws_ctrl.column_dimensions['B'].width = 60
-
-    r = 1
-    # ── Encabezado ──
-    t = ws_ctrl.cell(row=r, column=1, value='CONTROL DE REFERENCIA — contactos_nuevos')
-    t.font = Font(bold=True, name='Arial', size=12, color='FFFFFF')
-    t.fill = _hdr_fill
-    t.alignment = Alignment(horizontal='center', vertical='center')
-    ws_ctrl.merge_cells(f'A{r}:B{r}')
-    ws_ctrl.row_dimensions[r].height = 24; r += 1
-
-    # ── Advertencia principal si reporte desactualizado / incompleto ──
-    warnings = cd.get('warnings', [])
-    fecha_ok = cd.get('fecha_odoo_ok', True)
-    filas_ok = cd.get('filas_ok', True)
-    if not fecha_ok or not filas_ok or not cd.get('f_name'):
-        warn_txt = '⚠ REPORTE DE CONTACTOS DESACTUALIZADO O INCOMPLETO — NO IMPORTAR'
-        wc = ws_ctrl.cell(row=r, column=1, value=warn_txt)
-        wc.font = Font(bold=True, name='Arial', size=12, color='FFFFFF')
-        wc.fill = _warn_fill
-        wc.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        ws_ctrl.merge_cells(f'A{r}:B{r}')
-        ws_ctrl.row_dimensions[r].height = 30; r += 1
-
-    for w in warnings:
-        wc = ws_ctrl.cell(row=r, column=1, value=f'⚠ {w}')
-        wc.font = Font(bold=True, name='Arial', size=10, color='FFFFFF')
-        wc.fill = _warn_fill
-        ws_ctrl.merge_cells(f'A{r}:B{r}')
-        ws_ctrl.row_dimensions[r].height = 20; r += 1
-
-    r += 1  # separador
-    # ── Datos del reporte Odoo ──
-    r = _ctrl_row(ws_ctrl, r, 'Archivo de contactos Odoo usado', cd.get('f_name', '(no disponible)'))
-    r = _ctrl_row(ws_ctrl, r, 'Filas leídas', cd.get('n_filas_odoo', 0),
-                  fill=None if filas_ok else _warn_fill)
-    r = _ctrl_row(ws_ctrl, r, 'Fecha del reporte (del nombre del archivo)',
-                  'Hoy ✅' if fecha_ok else f'{cd.get("f_name","")[:30]} — no coincide con hoy ⚠',
-                  fill=None if fecha_ok else _warn_fill)
-    r += 1
-
-    # ── Resumen del control ──
-    r = _ctrl_row(ws_ctrl, r, 'Cuentas candidatas a "contacto nuevo"', cd.get('n_candidatos', len(casos_crear)))
-    r = _ctrl_row(ws_ctrl, r, 'Descartadas (Referencia ya existe en Odoo)', cd.get('n_descartados', 0),
-                  fill=PatternFill('solid',fgColor='FFF2CC') if cd.get('n_descartados') else None)
-    r = _ctrl_row(ws_ctrl, r, 'Con RUT distinto al de Odoo (revisar baja)', cd.get('n_rut_distinto', 0),
-                  fill=PatternFill('solid',fgColor='FCE4D6') if cd.get('n_rut_distinto') else None)
-    r = _ctrl_row(ws_ctrl, r, 'Contactos nuevos a importar', cd.get('n_nuevos', len(casos_crear)),
-                  fill=_ok_fill if cd.get('n_nuevos', 0) > 0 else None,
-                  bold_val=True)
-    r += 1
-
-    # ── Lista de descartados ──
-    descartados = cd.get('descartados', [])
-    if descartados:
-        h = ws_ctrl.cell(row=r, column=1, value='Referencia descartada')
-        h.fill = _hdr_fill; h.font = _hdr_font_w; h.border = _c_brd
-        h2 = ws_ctrl.cell(row=r, column=2, value='Nombre Odoo → DB_ID')
-        h2.fill = _hdr_fill; h2.font = _hdr_font_w; h2.border = _c_brd
-        r += 1
-        for d in descartados:
-            r = _ctrl_row(ws_ctrl, r, d['id_cuenta'],
-                          f"{d.get('nombre_odoo', d.get('nombre_cuenta', ''))} → DB_ID {d['db_id']}",
-                          fill=PatternFill('solid', fgColor='FFF2CC'))
-        r += 1
-
-    # ── Lista de RUT distinto ──
-    rut_dist = cd.get('rut_distinto', [])
-    if rut_dist:
-        h = ws_ctrl.cell(row=r, column=1, value='Referencia con RUT distinto (revisar baja)')
-        h.fill = PatternFill('solid', fgColor='C55A11'); h.font = _hdr_font_w; h.border = _c_brd
-        ws_ctrl.merge_cells(f'A{r}:B{r}'); r += 1
-        for d in rut_dist:
-            r = _ctrl_row(ws_ctrl, r, d['id_cuenta'],
-                          f"{d.get('nombre_odoo', '')} | RUT billing: {d.get('nif_billing','')} ≠ Odoo: {d.get('nif_odoo','')}",
-                          fill=PatternFill('solid', fgColor='FCE4D6'))
-        r += 1
-
-    # ── Referencias duplicadas en Odoo ──
     refs_dup = cd.get('refs_duplicadas_odoo', [])
     if refs_dup:
-        h = ws_ctrl.cell(row=r, column=1, value='Referencias duplicadas en Odoo (misma Ref en >1 contacto — limpiar)')
+        _warn_fill  = PatternFill('solid', fgColor='C00000')
+        _hdr_font_w = Font(bold=True, color='FFFFFF', name='Arial', size=10)
+        _c_brd      = Border(left=Side(style='thin',color='CCCCCC'),right=Side(style='thin',color='CCCCCC'),
+                             top=Side(style='thin',color='CCCCCC'),bottom=Side(style='thin',color='CCCCCC'))
+        ws_ctrl = wb.create_sheet('⚠ Refs duplicadas Odoo')
+        ws_ctrl.column_dimensions['A'].width = 20
+        ws_ctrl.column_dimensions['B'].width = 40
+        h = ws_ctrl.cell(row=1, column=1, value='Referencia duplicada en Odoo (misma Ref en >1 contacto — limpiar)')
         h.fill = _warn_fill; h.font = _hdr_font_w; h.border = _c_brd
-        ws_ctrl.merge_cells(f'A{r}:B{r}'); r += 1
-        for dup in refs_dup:
-            r = _ctrl_row(ws_ctrl, r, dup, '— duplicada en Odoo',
-                          fill=PatternFill('solid', fgColor='FCE4D6'))
+        h2 = ws_ctrl.cell(row=1, column=2, value='Acción')
+        h2.fill = _warn_fill; h2.font = _hdr_font_w; h2.border = _c_brd
+        for i, dup in enumerate(refs_dup, start=2):
+            c1 = ws_ctrl.cell(row=i, column=1, value=str(dup))
+            c1.font = Font(name='Arial', size=10); c1.border = _c_brd
+            c2 = ws_ctrl.cell(row=i, column=2, value='Revisar en Odoo y eliminar el duplicado')
+            c2.font = Font(name='Arial', size=10); c2.border = _c_brd
+            c2.fill = PatternFill('solid', fgColor='FCE4D6')
 
     output = io.BytesIO()
     wb.save(output); output.seek(0)
@@ -3246,6 +3171,8 @@ def run_auditoria(df_c, cols, ids_facturados_real):
             id_c, nombre, lineas = parse_tfp(ref_str)
             if not lineas:
                 continue
+            if nombre and re.match(r'^[A-Z0-9]{3,8}$', nombre):
+                nombre = id_to_nombre.get(str(id_c), '') or nombre
         elif ref_str.startswith('TNOM:'):
             nombre = ref_str[5:].strip()
             id_c   = nombre
@@ -3369,24 +3296,29 @@ def _card(icon, titulo, cuerpo, color_borde='#3938A0', color_fondo='#F5F5FF'):
     </div>""", unsafe_allow_html=True)
 
 def _guia_paso1():
-    _card('📋', 'PASO 1 — Crear contactos en Odoo',
-        '<b>¿Para qué sirve?</b> Para poder facturar, necesitamos tener actualizados los contactos en Odoo. '
-        'Este paso detecta qué cuentas son nuevas (no están en Odoo todavía) y genera el archivo para importarlas.<br><br>'
-        '<b>Flujo:</b><br>'
-        '① Subís los archivos de abajo ② Hacés clic en <i>Procesar</i> '
-        '③ Descargás el Excel de contactos ④ Lo importás en Odoo (<i>Contactos → Importar registros</i>) '
-        '⑤ Exportás los contactos actualizados desde Odoo (plantilla <b>"Clientes - AISpA"</b>) '
+    _card('📋', 'PASO 1 — Crear y actualizar contactos en Odoo',
+        '<b>¿Para qué sirve?</b> Detecta cuentas que no están en Odoo todavía y genera los archivos para importarlas '
+        'y actualizar las existentes.<br><br>'
+        '<b>Flujo:</b> '
+        '① Subís los archivos → '
+        '② <i>Procesar</i> → '
+        '③ Descargás <b>contactos_nuevos</b> e importás en Odoo (<i>Contactos → Importar registros</i>) → '
+        '④ Si hay <b>contactos_actualizar</b>, también lo importás → '
+        '⑤ Exportás el res.partner actualizado desde Odoo (plantilla <b>"Clientes - AISpA"</b>) → '
         '⑥ Volvés aquí, elegís <b>PASO 2</b> y subís ese archivo.<br><br>'
-        '<b>💡 Tip:</b> Si el procesador no genera archivo de contactos, todas las cuentas ya están en Odoo — podés ir directo al PASO 2.',
+        '<b>💡 Tip:</b> Si no se genera ningún archivo de contactos, todo ya está en Odoo — podés ir directo al PASO 2.',
         color_borde='#3938A0', color_fondo='#F5F5FF')
 
 def _guia_paso2(tipo_fact):
     _card('🧾', f'PASO 2 — Facturar ({tipo_fact})',
         '<b>¿Para qué sirve?</b> Genera el Excel de facturación listo para importar en Odoo.<br><br>'
-        '<b>Flujo:</b><br>'
-        '① Subís los archivos ② Elegís qué facturar (Terminales / Deuda fija / ambos) '
-        '③ Hacés clic en <i>Procesar</i> ④ Descargás el Excel de facturación '
-        '⑤ Lo importás en Odoo (<i>Facturación → Facturas de clientes → Importar registros</i>)<br><br>'
+        '<b>Flujo:</b> '
+        '① Si hiciste el PASO 1: subí el res.partner <b>actualizado</b> que exportaste de Odoo → '
+        '② Subís los demás archivos → '
+        '③ Elegís qué facturar (Terminales / Deuda fija / ambos) → '
+        '④ <i>Procesar</i> → '
+        '⑤ Descargás el Excel de facturación → '
+        '⑥ Lo importás en Odoo (<i>Facturación → Facturas de clientes → Importar registros</i>)<br><br>'
         '<b>💡 Tip:</b> Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
         color_borde='#FF5023', color_fondo='#FFF8F6')
 
@@ -3494,6 +3426,8 @@ def _uploader(role, label, types, help=None, key=None):
         col_a.success(f"✅ {stored.name}")
         if col_b.button("🗑️", key=f'_clr_{role}', help="Quitar archivo"):
             _ss_limpiar_archivo(role)
+            # Limpiar carga rápida para evitar que re-guarde el mismo archivo en el siguiente rerun
+            st.session_state.pop('_carga_rapida', None)
             st.rerun()
         return stored
     widget_key = key or f'_up_{role}'
@@ -3682,200 +3616,31 @@ def main():
     with col2:
         f_con = _uploader(
             'con', "Contactos Odoo — res.partner  *(requerido)*", ['xlsx'],
-            help="Exportación del modelo res.partner desde Odoo")
+            help="Exportación del modelo res.partner desde Odoo (plantilla 'Clientes - AISpA')")
         f_odo = _uploader(
             'odo', "Asiento contable Odoo  *(requerido)*", ['xlsx'],
             help="Para detectar facturas ya procesadas y evitar duplicados")
-
-    f_acc = None
-    if proc_com:
-        st.subheader("📁 Adicional para Deuda fija")
         f_acc = _uploader(
-            'acc', "Accounts CSV  *(necesario para Deuda fija)*", ['csv'],
-            help="accounts_FECHA.csv exportado de dash.fu.do")
+            'acc', "Accounts CSV  *(requerido)*", ['csv'],
+            help="accounts_FECHA.csv exportado de dash.fu.do — viene en el mismo zip que el Billing data")
 
     f_dv_ext_p1 = None
     if es_paso1 and not es_guia:
-        st.subheader("📁 Adicional para Deuda Viva *(opcional)*")
-        f_dv_ext_p1 = _uploader(
-            'dv_ext_p1',
-            "Extracto Deuda Viva  *(opcional — para incluir contactos DV nuevos)*",
-            ['xlsx'],
-            help="Si subís este archivo, el PASO 1 detecta qué cuentas DV no están en Odoo y las agrega al archivo de contactos"
-        )
+        with st.expander("📊 Extracto Deuda Viva *(opcional)*", expanded=False):
+            st.caption("Si lo subís, el PASO 1 detecta qué cuentas de Deuda Viva son nuevas y las agrega al archivo de contactos.")
+            f_dv_ext_p1 = _uploader(
+                'dv_ext_p1',
+                "Extracto Deuda Viva",
+                ['xlsx'],
+                help="Si subís este archivo, el PASO 1 detecta qué cuentas DV no están en Odoo y las agrega al archivo de contactos"
+            )
 
-    # ── Billing manual (cuentas sin Billing Data) ───────────────
+    # ── Estado interno (sin UI pre-proceso) ────────────────────
     if 'billing_manual' not in st.session_state:
         st.session_state['billing_manual'] = []
-
-    _falta_billing = st.session_state.get('cuentas_sin_billing', {})
-    _ya_cargados   = {e['id_cuenta'] for e in st.session_state['billing_manual']}
-    _pendientes    = {k: v for k, v in _falta_billing.items() if k not in _ya_cargados}
-
-    _expander_label = (
-        f"📝 Datos de facturación manual — ⚠️ {len(_pendientes)} cuenta(s) pendiente(s)"
-        if _pendientes else
-        "📝 Datos de facturación manual *(opcional)*"
-    )
-    with st.expander(_expander_label, expanded=bool(_pendientes)):
-        st.caption(
-            "Para cuentas que cargaron sus datos hoy y aún no aparecen en el Billing Data. "
-            "Hacé click en el link de la cuenta, copiá los datos de facturación y pegalo acá."
-        )
-
-        # ── Lista de cuentas detectadas sin billing ──────────────
-        if _pendientes:
-            st.warning(f"⚠️ **{len(_pendientes)} cuenta(s) sin datos de facturación** del último procesamiento:")
-            for _bm_id, _bm_nombre in _pendientes.items():
-                st.markdown(
-                    f"→ **[{_bm_nombre or _bm_id}](https://dash.fu.do/accounts/{_bm_id})**"
-                    f" `ID: {_bm_id}`"
-                )
-
-            # ── Motorcito: generar HTML con IDs pre-cargados ──
-            st.caption("**Motorcito:** descargá el extractor automático para obtener los datos de estas cuentas desde dash.fu.do.")
-            _col_motor1, _col_motor2 = st.columns([3, 5])
-            with _col_motor1:
-                try:
-                    _html_motorcito = generar_html_motorcito_billing(_pendientes)
-                    st.download_button(
-                        label="🔧 Generar motorcito de billing",
-                        data=_html_motorcito,
-                        file_name="motorcito_billing.html",
-                        mime="text/html",
-                        help="Descargá este HTML, abrilo en el navegador y arrastrá el favorito a Chrome. Luego usalo estando en dash.fu.do para extraer los datos de las cuentas pendientes.",
-                        use_container_width=True,
-                    )
-                except Exception as _e_motor:
-                    st.error(f"❌ No se pudo generar el motorcito: {_e_motor}")
-            with _col_motor2:
-                st.caption(
-                    "1. Descargá y abrí el HTML → arrastrá el favorito a Chrome  \n"
-                    "2. Andá a dash.fu.do → hacé clic en el favorito  \n"
-                    "3. Los IDs ya están cargados → hacé clic en **Iniciar**  \n"
-                    "4. En cada cuenta, volvé a hacer clic → extrae y pasa a la siguiente  \n"
-                    "5. Al terminar descarga `billing_suplementario.csv` → subilo acá como Billing Data"
-                )
-
-            st.divider()
-
-        with st.form("form_billing_manual", clear_on_submit=True):
-            if _pendientes:
-                _opciones_bm  = [''] + list(_pendientes.keys())
-                _formato_bm   = lambda x: f"{_pendientes[x]} ({x})" if x else "— seleccioná una cuenta —"
-                _sel_bm       = st.selectbox("Cuenta a cargar", options=_opciones_bm, format_func=_formato_bm)
-                _id_manual_bm = _sel_bm
-            else:
-                _id_manual_bm = st.text_input("ID de cuenta", placeholder="383653",
-                                               help="Número que aparece en dash.fu.do/accounts/…")
-
-            texto_bm = st.text_area(
-                "Datos de facturación",
-                placeholder=(
-                    "Tipo de identificación\tRUT\n"
-                    "RUT\t78453772-2\n"
-                    "Razón social\tGastronomía Ejemplo SPA\n"
-                    "Giro\tRestaurante\n"
-                    "País\tChile\n"
-                    "Comuna\tSantiago Centro\n"
-                    "Región\tMetropolitana\n"
-                    "Domicilio\tAv. Ejemplo 1234\n"
-                    "Email\tejemplo@mail.com"
-                ),
-                height=200,
-            )
-            guardar_bm = st.form_submit_button("💾 Guardar cuenta", use_container_width=True)
-            if guardar_bm:
-                if not str(_id_manual_bm).strip():
-                    st.warning("Seleccioná o ingresá el ID de la cuenta.")
-                elif not texto_bm.strip():
-                    st.warning("Pegá los datos de facturación.")
-                else:
-                    _parsed_bm = parsear_billing_manual(texto_bm, override_id=str(_id_manual_bm).strip())
-                    if _parsed_bm:
-                        _ids_bm = {e['id_cuenta'] for e in st.session_state['billing_manual']}
-                        if _parsed_bm['id_cuenta'] in _ids_bm:
-                            st.warning(f"⚠️ La cuenta {_parsed_bm['id_cuenta']} ya fue cargada.")
-                        else:
-                            st.session_state['billing_manual'].append(_parsed_bm)
-                            # Quitar de pendientes
-                            if _parsed_bm['id_cuenta'] in st.session_state.get('cuentas_sin_billing', {}):
-                                del st.session_state['cuentas_sin_billing'][_parsed_bm['id_cuenta']]
-                            st.rerun()
-                    else:
-                        st.error("❌ No se pudo parsear el bloque. Verificá el formato.")
-
-        if st.session_state['billing_manual']:
-            st.markdown(f"**{len(st.session_state['billing_manual'])} cuenta(s) cargada(s):**")
-            for _i_bm, _e_bm in enumerate(st.session_state['billing_manual']):
-                _c1_bm, _c2_bm = st.columns([9, 1])
-                with _c1_bm:
-                    _nombre_bm = _e_bm['razon_social'] or f"ID {_e_bm['id_cuenta']}"
-                    st.markdown(
-                        f"- **{_nombre_bm}** (ID: `{_e_bm['id_cuenta']}`) — "
-                        f"RUT: `{_e_bm['rut'] or '—'}` — {_e_bm['email'] or '—'}"
-                    )
-                with _c2_bm:
-                    if st.button("✕", key=f"del_bm_{_i_bm}"):
-                        st.session_state['billing_manual'].pop(_i_bm)
-                        st.rerun()
-
-    # ── Pagos manuales (no en collection) ───────────────────────
-    with st.expander("📎 Pagos recientes no incluidos en el collection *(opcional)*"):
-        tiene_gemini = bool(st.secrets.get("GOOGLE_API_KEY", ""))
-        if tiene_gemini:
-            st.caption("Subí capturas de comprobantes — Gemini extrae los datos automáticamente.")
-            f_comprobantes = st.file_uploader(
-                "Comprobantes Mercado Pago",
-                type=["png", "jpg", "jpeg", "webp"],
-                accept_multiple_files=True,
-                key="comprobantes_img",
-            )
-        else:
-            f_comprobantes = []
-            st.caption(
-                "Ingresá los datos del comprobante manualmente (MP → detalle del pago). "
-                "Para carga automática por imagen, configurá `GOOGLE_API_KEY` en Secrets."
-            )
-        if "pagos_extra" not in st.session_state:
-            st.session_state["pagos_extra"] = []
-
-        with st.form("form_pago_extra", clear_on_submit=True):
-            pe1, pe2, pe3, pe4 = st.columns([2, 3, 1.5, 1.5])
-            with pe1:
-                pe_opid  = st.text_input("N° de operación", placeholder="171378683486")
-            with pe2:
-                pe_ref   = st.text_input("Referencia adicional", placeholder="TFP:372131:1:Kioto bistro")
-            with pe3:
-                pe_monto = st.number_input("Monto $", min_value=0.0, step=1.0, format="%.0f")
-            with pe4:
-                pe_fecha = st.date_input("Fecha", value=date.today())
-            agregar = st.form_submit_button("➕ Agregar pago", use_container_width=True)
-            if agregar:
-                if pe_opid.strip() and pe_ref.strip() and pe_monto > 0:
-                    st.session_state["pagos_extra"].append({
-                        "operation_id": pe_opid.strip(),
-                        "referencia":   pe_ref.strip(),
-                        "monto":        float(pe_monto),
-                        "fecha":        pe_fecha.strftime("%Y-%m-%d"),
-                    })
-                    st.rerun()
-                else:
-                    st.warning("Completá todos los campos.")
-
-        if st.session_state["pagos_extra"]:
-            st.markdown(f"**{len(st.session_state['pagos_extra'])} pago(s) agregado(s):**")
-            for i, p in enumerate(st.session_state["pagos_extra"]):
-                c1, c2 = st.columns([9, 1])
-                with c1:
-                    st.markdown(
-                        f"- `{p['operation_id']}` — {p['referencia']} — "
-                        f"**${p['monto']:,.0f}** — {p['fecha']}"
-                    )
-                with c2:
-                    if st.button("✕", key=f"del_pe_{i}"):
-                        st.session_state["pagos_extra"].pop(i)
-                        st.rerun()
+    if "pagos_extra" not in st.session_state:
+        st.session_state["pagos_extra"] = []
+    f_comprobantes = []
 
     # ── Botón ───────────────────────────────────────────────────
     st.divider()
@@ -4088,12 +3853,8 @@ def main():
                                                        emails_map=st.session_state.get('emails_map', {}),
                                                        control_data=_ctrl)
             _nombre_cont = f"contactos_nuevos_{date.today().strftime('%Y%m%d')}.xlsx"
-        elif _ctrl.get('n_descartados') or _ctrl.get('refs_duplicadas_odoo'):
-            # No hay nuevos pero sí hay hallazgos de control → generar igual para mostrar el Control sheet
-            with st.spinner("Generando reporte de control..."):
-                _excel_cont = generar_excel_contactos([], [], [], [], rl,
-                                                       control_data=_ctrl)
-            _nombre_cont = f"control_contactos_{date.today().strftime('%Y%m%d')}.xlsx"
+        # En Paso 2, no generar archivo de control si no hay contactos nuevos
+        # (las refs duplicadas se muestran en la UI)
 
         _excel_act, _nombre_act, _partes_act = None, None, []
         if hay_actualizaciones:
@@ -4158,7 +3919,8 @@ def main():
             'ctrl_descartados':  _ctrl.get('n_descartados', 0),
             'ctrl_rut_distinto': _ctrl.get('n_rut_distinto', 0),
             'ctrl_warnings':     _ctrl.get('warnings', []),
-            'ctrl_fecha_ok':     _ctrl.get('fecha_odoo_ok', True),
+            'ctrl_fecha_ok':          _ctrl.get('fecha_odoo_ok', True),
+            'ctrl_refs_duplicadas':   _ctrl.get('refs_duplicadas_odoo', []),
             'ctrl_filas_ok':     _ctrl.get('filas_ok', True),
         }
 
@@ -4216,23 +3978,30 @@ def main():
         if _s['n_alertas_monto']:
             st.warning(f"⚠️ **{_s['n_alertas_monto']} alerta(s)** de monto — ver hoja '⚠ Alertas Monto'.")
 
-        # ── Resumen control de referencia ──
-        if not _s.get('ctrl_fecha_ok', True) or not _s.get('ctrl_filas_ok', True):
-            st.error("⚠️ **Reporte de contactos desactualizado o incompleto** — revisar hoja 'Control' antes de importar.")
-        for _w in _s.get('ctrl_warnings', []):
-            st.warning(f"⚠️ Contactos Odoo: {_w}")
-        if _s.get('ctrl_descartados', 0):
-            st.info(f"ℹ️ **{_s['ctrl_descartados']} cuenta(s)** ya tienen Referencia en Odoo → descartadas del archivo de nuevos (ver hoja 'Control').")
-        if _s.get('ctrl_rut_distinto', 0):
-            st.warning(f"⚠️ **{_s['ctrl_rut_distinto']} cuenta(s)** tienen Referencia en Odoo con RUT distinto → revisar baja/cambio (ver hoja 'Control').")
+        # ── Resumen control de referencia (solo Paso 1) ──
+        if _s.get('es_paso1'):
+            for _w in _s.get('ctrl_warnings', []):
+                st.warning(f"⚠️ Contactos Odoo: {_w}")
+            if _s.get('ctrl_descartados', 0):
+                st.info(f"ℹ️ **{_s['ctrl_descartados']} cuenta(s)** ya tienen Referencia en Odoo → descartadas del archivo de nuevos.")
+            if _s.get('ctrl_rut_distinto', 0):
+                st.warning(f"⚠️ **{_s['ctrl_rut_distinto']} cuenta(s)** tienen Referencia en Odoo con RUT distinto → revisar baja/cambio.")
+            # Referencias duplicadas en Odoo
+            _refs_dup = _s.get('ctrl_refs_duplicadas', [])
+            if _refs_dup:
+                st.warning(f"⚠️ **{len(_refs_dup)} referencia(s) duplicada(s) en Odoo** (misma Ref en más de un contacto — limpiar): {', '.join(str(r) for r in _refs_dup[:5])}" +
+                           (f" y {len(_refs_dup)-5} más" if len(_refs_dup) > 5 else ""))
 
         st.divider()
         st.subheader("📥 Descargar archivos")
         dl_col1, dl_col2 = st.columns(2)
 
         with dl_col1:
-            if _s['excel_cont']:
-                st.warning(f"⚠️ {_s['n_crear']} contacto(s) nuevo(s) — importalos en Odoo")
+            if _s['excel_cont'] and _s.get('es_paso1'):
+                # Solo mostrar archivo de contactos en Paso 1
+                _n_crear = _s['n_crear']
+                if _n_crear > 0:
+                    st.warning(f"⚠️ {_n_crear} contacto(s) nuevo(s) — importalos en Odoo")
                 st.download_button(
                     label=f"📋 {_s['nombre_cont']}",
                     data=_s['excel_cont'],
@@ -4241,7 +4010,7 @@ def main():
                     use_container_width=True,
                     help="Importar en Odoo → Contactos → Importar registros"
                 )
-            elif not _s['hay_actualizaciones']:
+            elif not _s['hay_actualizaciones'] and _s.get('es_paso1'):
                 st.success("✅ Todos los contactos ya están en Odoo")
 
         with dl_col2:
@@ -4253,18 +4022,26 @@ def main():
                     file_name=_s['nombre_act'],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    help="Importar en Odoo para actualizar contactos existentes"
+                    help="Importar en Odoo para actualizar contactos existentes (Contactos → Importar registros)"
                 )
+                if _s.get('es_paso1'):
+                    st.caption("💡 Importá también este archivo en Odoo para actualizar los datos de los contactos existentes.")
 
         if _s['es_paso1']:
+            _tiene_nuevos = bool(_s.get('excel_cont'))
+            _tiene_act    = bool(_s.get('excel_act'))
+            _pasos = []
+            if _tiene_nuevos:
+                _pasos.append("1. Importá **contactos_nuevos** en Odoo (Contactos → Importar registros)")
+            if _tiene_act:
+                _pasos.append(f"{'2' if _tiene_nuevos else '1'}. Importá también **contactos_actualizar** en Odoo para actualizar datos existentes")
+            _n = len(_pasos) + 1
+            _pasos.append(f"{_n}. Exportá el res.partner actualizado desde Odoo (plantilla **'Clientes - AISpA'**)")
+            _pasos.append(f"{_n+1}. Volvé aquí, seleccioná **PASO 2** y subí ese archivo")
+            if not _tiene_nuevos and not _tiene_act:
+                _pasos = ["Todos los contactos están al día en Odoo. Podés ir directo al **PASO 2**."]
             with dl_col2:
-                st.info(
-                    "**PASO 1 completado.**\n\n"
-                    "1. Descargá el archivo de contactos ←\n"
-                    "2. Importalo en Odoo (Contactos → Importar)\n"
-                    "3. Exportá el res.partner actualizado desde Odoo\n"
-                    "4. Volvé aquí, seleccioná **PASO 2** y subí el nuevo res.partner"
-                )
+                st.info("**PASO 1 completado.**\n\n" + "\n".join(_pasos))
         elif _s['hay_contactos_nuevos']:
             with dl_col2:
                 st.error(
