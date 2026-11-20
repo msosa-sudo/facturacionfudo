@@ -3649,7 +3649,8 @@ def main():
     _faltantes_prev = [n for r, n in _roles_req if not _ss_obtener_archivo(r)]
     if _faltantes_prev:
         st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(_faltantes_prev)}**")
-    if es_paso2 and not _ss_obtener_archivo('con'):
+    _es_paso2 = not es_paso1 and not es_hw and not es_dv and not es_guia
+    if _es_paso2 and not _ss_obtener_archivo('con'):
         st.warning("📥 **Paso 2:** el único archivo que cambia respecto al Paso 1 es **Contactos Odoo** — "
                    "exportá el res.partner actualizado de Odoo (después de haber importado los contactos del Paso 1) y subilo acá.")
 
