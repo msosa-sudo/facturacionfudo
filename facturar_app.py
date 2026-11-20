@@ -3366,12 +3366,12 @@ def _guia_paso1():
         color_borde='#3938A0', color_fondo='#F5F5FF')
 
 def _guia_paso2(tipo_fact):
-    _card('🧾', f'PASO 2 — Facturar ({tipo_fact})',
+    _card('🧾', 'PASO 2 — Facturar',
         'Los archivos del PASO 1 ya están cargados. El único que cambia es <b>Contactos Odoo</b>.',
         pasos=[
-            'En Odoo, exportá el res.partner actualizado (plantilla <b>"Clientes - AISpA"</b>) — es el mismo archivo pero con los contactos nuevos ya importados',
-            'Subí ese archivo acá (el viejo se eliminó automáticamente)',
-            'Hacé clic en <b>Procesar</b>',
+            'En Odoo, exportá el res.partner actualizado (plantilla <b>"Clientes - AISpA"</b>) — el mismo modelo pero con los contactos nuevos ya importados',
+            'Subí ese archivo acá — el viejo se eliminó automáticamente al pasar al Paso 2',
+            'Hacé clic en <b>Procesar</b> — el sistema detecta automáticamente si hay Terminales, Deuda fija o ambas',
             'Descargá el Excel de facturación e importalo en Odoo → <i>Facturación → Facturas de clientes → Importar registros</i>',
         ],
         tip='Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
@@ -3594,14 +3594,7 @@ def main():
         es_dv    = "Deuda Viva" in paso
         es_guia  = "Guía" in paso
 
-        tipo_fact = "Terminales + Deuda fija"  # default
-        if not es_paso1 and not es_hw and not es_dv and not es_guia:
-            st.markdown("**¿Qué querés facturar?**")
-            tipo_fact = st.selectbox("", [
-                "Terminales",
-                "Deuda fija",
-                "Terminales + Deuda fija",
-            ], label_visibility="collapsed")
+        tipo_fact = "Terminales + Deuda fija"  # siempre procesa todo, genera lo que haya
 
         st.divider()
         st.markdown("""
