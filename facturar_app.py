@@ -3646,10 +3646,10 @@ def main():
 
     # ── Aviso archivos faltantes (antes de los uploaders) ──────
     _roles_req = [('col',"Collection"),('bil',"Billing data"),('con',"Contactos Odoo"),('odo',"Asiento contable")]
-    _faltantes_prev = [n for r, n in _roles_req if not _ss_leer_archivo(r)]
+    _faltantes_prev = [n for r, n in _roles_req if not _ss_obtener_archivo(r)]
     if _faltantes_prev:
         st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(_faltantes_prev)}**")
-    if es_paso2 and not _ss_leer_archivo('con'):
+    if es_paso2 and not _ss_obtener_archivo('con'):
         st.warning("📥 **Paso 2:** el único archivo que cambia respecto al Paso 1 es **Contactos Odoo** — "
                    "exportá el res.partner actualizado de Odoo (después de haber importado los contactos del Paso 1) y subilo acá.")
 
