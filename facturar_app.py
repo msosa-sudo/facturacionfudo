@@ -3619,6 +3619,22 @@ def main():
 
     st.divider()
 
+    # ── Auto-limpiar Contactos Odoo al entrar al Paso 2 ────────
+    _es_paso2 = not es_paso1 and not es_hw and not es_dv and not es_guia
+    _last_paso = st.session_state.get('_last_paso', '')
+    if _es_paso2 and 'PASO 1' in _last_paso:
+        _ss_limpiar_archivo('con')
+    st.session_state['_last_paso'] = paso
+
+    # ── Aviso archivos faltantes (arriba de todo) ───────────────
+    _roles_req = [('col',"Collection"),('bil',"Billing data"),('con',"Contactos Odoo"),('odo',"Asiento contable")]
+    _faltantes_prev = [n for r, n in _roles_req if not _ss_obtener_archivo(r)]
+    if _faltantes_prev:
+        st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(_faltantes_prev)}**")
+    if _es_paso2 and not _ss_obtener_archivo('con'):
+        st.warning("📥 **Paso 2:** el único archivo que cambia respecto al Paso 1 es **Contactos Odoo** — "
+                   "exportá el res.partner actualizado de Odoo (después de haber importado los contactos del Paso 1) y subilo acá.")
+
     # ── Carga rápida ───────────────────────────────────────────
     with st.expander("⚡ Carga rápida — seleccioná todos los archivos de una vez", expanded=False):
         st.caption("Seleccioná todos los archivos juntos. El procesador detecta automáticamente qué es cada uno.")
@@ -3643,16 +3659,6 @@ def main():
                 st.success(f"✅ **{_ROLES_LABELS.get(_rol, _rol)}**: {_nom}")
             for _nom in _no_detectados:
                 st.warning(f"⚠️ No se pudo detectar el rol de: **{_nom}** — subilo manualmente abajo")
-
-    # ── Aviso archivos faltantes (antes de los uploaders) ──────
-    _roles_req = [('col',"Collection"),('bil',"Billing data"),('con',"Contactos Odoo"),('odo',"Asiento contable")]
-    _faltantes_prev = [n for r, n in _roles_req if not _ss_obtener_archivo(r)]
-    if _faltantes_prev:
-        st.info(f"⬆️ Subí los archivos requeridos: **{', '.join(_faltantes_prev)}**")
-    _es_paso2 = not es_paso1 and not es_hw and not es_dv and not es_guia
-    if _es_paso2 and not _ss_obtener_archivo('con'):
-        st.warning("📥 **Paso 2:** el único archivo que cambia respecto al Paso 1 es **Contactos Odoo** — "
-                   "exportá el res.partner actualizado de Odoo (después de haber importado los contactos del Paso 1) y subilo acá.")
 
     # ── File uploaders ──────────────────────────────────────────
     st.subheader("📁 Archivos requeridos")
