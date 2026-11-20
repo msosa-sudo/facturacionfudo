@@ -3367,14 +3367,12 @@ def _guia_paso1():
 
 def _guia_paso2(tipo_fact):
     _card('🧾', f'PASO 2 — Facturar ({tipo_fact})',
-        'Genera el Excel de facturación listo para importar en Odoo.',
+        'Los archivos del PASO 1 ya están cargados. El único que cambia es <b>Contactos Odoo</b>.',
         pasos=[
-            'Subí el res.partner <b>actualizado</b> que exportaste de Odoo en el PASO 1',
-            'Subí los demás archivos (Collection, Billing data, Asiento contable, Accounts CSV)',
-            'Elegí qué facturar: Terminales / Deuda fija / ambos',
+            'En Odoo, exportá el res.partner actualizado (plantilla <b>"Clientes - AISpA"</b>) — es el mismo archivo pero con los contactos nuevos ya importados',
+            'Subí ese archivo acá (el viejo se eliminó automáticamente)',
             'Hacé clic en <b>Procesar</b>',
-            'Descargá el Excel de facturación',
-            'Importalo en Odoo → <i>Facturación → Facturas de clientes → Importar registros</i>',
+            'Descargá el Excel de facturación e importalo en Odoo → <i>Facturación → Facturas de clientes → Importar registros</i>',
         ],
         tip='Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
         color_borde='#FF5023', color_fondo='#FFF8F6')
@@ -3650,10 +3648,8 @@ def main():
     _last_paso = st.session_state.get('_last_paso', '')
     if _es_paso2 and 'PASO 1' in _last_paso:
         _ss_limpiar_archivo('con')
-        # Marcar 'con' como recién borrado para que la carga rápida no lo re-guarde
-        _jc = st.session_state.get('_just_cleared', set())
-        _jc.add('con')
-        st.session_state['_just_cleared'] = _jc
+        # Resetear el widget de carga rápida para que no re-guarde el archivo viejo
+        st.session_state['_cr_ver'] = st.session_state.get('_cr_ver', 0) + 1
     st.session_state['_last_paso'] = paso
 
     # ── Aviso archivos faltantes (arriba de todo) ───────────────
@@ -3670,7 +3666,8 @@ def main():
         st.caption("Seleccioná todos los archivos juntos. El procesador detecta automáticamente qué es cada uno.")
         _archivos_rapidos = st.file_uploader(
             "Seleccionar archivos", type=['xlsx', 'csv'],
-            accept_multiple_files=True, key='_carga_rapida',
+            accept_multiple_files=True,
+            key=f'_carga_rapida_{st.session_state.get("_cr_ver", 0)}',
             label_visibility='collapsed'
         )
         if _archivos_rapidos:
