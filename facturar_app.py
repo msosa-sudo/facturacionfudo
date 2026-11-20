@@ -3323,43 +3323,60 @@ def generar_excel_auditoria(filas, periodo=''):
 
 
 # ─── Paneles de guía inline ──────────────────────────────────────────────────
-def _card(icon, titulo, cuerpo, color_borde='#3938A0', color_fondo='#F5F5FF'):
-    """Renderiza una card de guía estilizada."""
+def _pasos_html(pasos, color):
+    """Genera lista vertical de pasos numerados."""
+    items = ''.join(
+        f'<div style="display:flex; gap:12px; align-items:flex-start; margin-bottom:10px;">'
+        f'  <div style="background:{color}; color:#fff; border-radius:50%; width:28px; height:28px; '
+        f'              min-width:28px; display:flex; align-items:center; justify-content:center; '
+        f'              font-weight:700; font-size:14px;">{i+1}</div>'
+        f'  <div style="font-size:15px; color:#222; padding-top:3px; line-height:1.5;">{p}</div>'
+        f'</div>'
+        for i, p in enumerate(pasos)
+    )
+    return items
+
+def _card(icon, titulo, subtitulo, pasos, tip, color_borde='#3938A0', color_fondo='#F5F5FF'):
+    """Renderiza una card de guía estilizada con pasos verticales."""
+    pasos_html = _pasos_html(pasos, color_borde)
     st.markdown(f"""
-    <div style="border-left:4px solid {color_borde}; background:{color_fondo};
-                border-radius:8px; padding:16px 20px; margin-bottom:16px;">
-      <div style="font-family:'Barlow',sans-serif; font-size:16px; font-weight:700;
-                  color:{color_borde}; margin-bottom:8px;">{icon} {titulo}</div>
-      <div style="font-family:'Barlow',sans-serif; font-size:14px; color:#333; line-height:1.6;">
-        {cuerpo}
-      </div>
+    <div style="border-left:5px solid {color_borde}; background:{color_fondo};
+                border-radius:8px; padding:20px 24px; margin-bottom:16px;">
+      <div style="font-family:'Barlow',sans-serif; font-size:20px; font-weight:800;
+                  color:{color_borde}; margin-bottom:6px;">{icon} {titulo}</div>
+      <div style="font-family:'Barlow',sans-serif; font-size:15px; color:#555;
+                  margin-bottom:16px;">{subtitulo}</div>
+      {pasos_html}
+      <div style="margin-top:12px; font-size:14px; color:#666; background:rgba(0,0,0,0.04);
+                  border-radius:6px; padding:8px 12px;">💡 {tip}</div>
     </div>""", unsafe_allow_html=True)
 
 def _guia_paso1():
     _card('📋', 'PASO 1 — Crear y actualizar contactos en Odoo',
-        '<b>¿Para qué sirve?</b> Detecta cuentas que no están en Odoo todavía y genera los archivos para importarlas '
-        'y actualizar las existentes.<br><br>'
-        '<b>Flujo:</b> '
-        '① Subís los archivos → '
-        '② <i>Procesar</i> → '
-        '③ Descargás <b>contactos_nuevos</b> e importás en Odoo (<i>Contactos → Importar registros</i>) → '
-        '④ Si hay <b>contactos_actualizar</b>, también lo importás → '
-        '⑤ Exportás el res.partner actualizado desde Odoo (plantilla <b>"Clientes - AISpA"</b>) → '
-        '⑥ Volvés aquí, elegís <b>PASO 2</b> y subís ese archivo.<br><br>'
-        '<b>💡 Tip:</b> Si no se genera ningún archivo de contactos, todo ya está en Odoo — podés ir directo al PASO 2.',
+        'Detecta cuentas que no están en Odoo y genera los archivos para importarlas.',
+        pasos=[
+            'Subí los archivos requeridos',
+            'Hacé clic en <b>Procesar</b>',
+            'Descargá <b>contactos_nuevos</b> e importalo en Odoo → <i>Contactos → Importar registros</i>',
+            'Si hay <b>contactos_actualizar</b>, importalo también',
+            'Exportá el res.partner actualizado desde Odoo (plantilla <b>"Clientes - AISpA"</b>)',
+            'Volvé aquí, elegí <b>PASO 2</b> y subí ese archivo exportado',
+        ],
+        tip='Si no se genera ningún archivo de contactos, todo ya está en Odoo — podés ir directo al PASO 2.',
         color_borde='#3938A0', color_fondo='#F5F5FF')
 
 def _guia_paso2(tipo_fact):
     _card('🧾', f'PASO 2 — Facturar ({tipo_fact})',
-        '<b>¿Para qué sirve?</b> Genera el Excel de facturación listo para importar en Odoo.<br><br>'
-        '<b>Flujo:</b> '
-        '① Si hiciste el PASO 1: subí el res.partner <b>actualizado</b> que exportaste de Odoo → '
-        '② Subís los demás archivos → '
-        '③ Elegís qué facturar (Terminales / Deuda fija / ambos) → '
-        '④ <i>Procesar</i> → '
-        '⑤ Descargás el Excel de facturación → '
-        '⑥ Lo importás en Odoo (<i>Facturación → Facturas de clientes → Importar registros</i>)<br><br>'
-        '<b>💡 Tip:</b> Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
+        'Genera el Excel de facturación listo para importar en Odoo.',
+        pasos=[
+            'Subí el res.partner <b>actualizado</b> que exportaste de Odoo en el PASO 1',
+            'Subí los demás archivos (Collection, Billing data, Asiento contable, Accounts CSV)',
+            'Elegí qué facturar: Terminales / Deuda fija / ambos',
+            'Hacé clic en <b>Procesar</b>',
+            'Descargá el Excel de facturación',
+            'Importalo en Odoo → <i>Facturación → Facturas de clientes → Importar registros</i>',
+        ],
+        tip='Si el asiento ya incluye una operación, el procesador la saltea automáticamente para evitar duplicados.',
         color_borde='#FF5023', color_fondo='#FFF8F6')
 
 def _guia_archivos(es_paso1, proc_com):
@@ -3633,6 +3650,10 @@ def main():
     _last_paso = st.session_state.get('_last_paso', '')
     if _es_paso2 and 'PASO 1' in _last_paso:
         _ss_limpiar_archivo('con')
+        # Marcar 'con' como recién borrado para que la carga rápida no lo re-guarde
+        _jc = st.session_state.get('_just_cleared', set())
+        _jc.add('con')
+        st.session_state['_just_cleared'] = _jc
     st.session_state['_last_paso'] = paso
 
     # ── Aviso archivos faltantes (arriba de todo) ───────────────
